@@ -228,7 +228,7 @@ def health():
     return jsonify({"status": "ok", "servicio": "La Red - Generador de Imágenes"})
 
 
-@app.route("/generar-imagen", methods=["POST"])
+@app.route("/generar-imagen", methods=["GET", "POST"])
 def generar():
     """
     Endpoint principal. Acepta tres formatos:
@@ -247,6 +247,34 @@ def generar():
     """
     titulo = None
     foto_bytes = None
+
+    # Soporte GET con query parameters
+    if request.method == "GET":
+        titulo = request.args.get("titulo", "").strip()
+        foto_url = request.args.get("foto_url", "").strip()
+        if foto_url:
+            try:
+                result = cloudinary.uploader.upload(
+                    foto_url,
+                    public_id="lared/temp_foto",
+                    overwrite=True,
+                    resource_type="image"
+                )
+                cloudinary_url = result["secure_url"]
+                resp = requests.get(cloudinary_url, timeout=30)
+                resp.raise_for_status()
+                foto_bytes = resp.content
+            except Exception:
+                foto_bytes = descargar_imagen_url(foto_url)
+        if not titulo:
+            return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
+        if not foto_bytes:
+            return jsonify({"error": "Se requiere foto_url"}), 400
+        try:
+            imagen_url = generar_imagen(foto_bytes, titulo)
+            return jsonify({"imagen_url": imagen_url, "ok": True})
+        except Exception as e:
+            return jsonify({"error": str(e), "ok": False}), 500
 
     content_type = request.content_type or ""
 
