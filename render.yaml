@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: lared-imagen-api
+    env: python
+    buildCommand: pip install -r requirements.txt && apt-get install -y fonts-liberation
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: CLOUDINARY_CLOUD_NAME
+        value: dd9cuovet
+      - key: CLOUDINARY_API_KEY
+        value: "436436496366223"
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+    plan: free
