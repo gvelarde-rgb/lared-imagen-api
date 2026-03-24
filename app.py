@@ -277,7 +277,21 @@ def generar():
         foto_b64 = data.get("foto_base64", "").strip()
 
         if foto_url:
-            foto_bytes = descargar_imagen_url(foto_url)
+            # Intentar descargar via Cloudinary primero (evita captcha)
+            try:
+                result = cloudinary.uploader.upload(
+                    foto_url,
+                    public_id="lared/temp_foto",
+                    overwrite=True,
+                    resource_type="image"
+                )
+                cloudinary_url = result["secure_url"]
+                resp = requests.get(cloudinary_url, timeout=30)
+                resp.raise_for_status()
+                foto_bytes = resp.content
+            except Exception:
+                # Fallback: descarga directa
+                foto_bytes = descargar_imagen_url(foto_url)
         elif foto_b64:
             if "," in foto_b64:
                 foto_b64 = foto_b64.split(",", 1)[1]
