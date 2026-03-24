@@ -7,7 +7,7 @@ Body (application/json o form-data):
 Respuesta: { "imagen_url": "https://res.cloudinary.com/..." }
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import io
@@ -205,22 +205,28 @@ def generar_imagen(foto_bytes, titulo):
         font=font_logo,
     )
 
-    # 6. Guardar en buffer y subir a Cloudinary
+    # 6. Guardar en buffer
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, "JPEG", quality=92)
     buffer.seek(0)
+    imagen_bytes = buffer.getvalue()
 
-    # Usar hash del título como public_id para evitar duplicados
+    # Subir a Cloudinary para respaldo y URL permanente
     titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
     public_id = f"lared/noticia_{titulo_hash}"
-
+    buffer.seek(0)
     result = cloudinary.uploader.upload(
         buffer,
         public_id=public_id,
         overwrite=True,
         resource_type="image",
     )
-    return result["secure_url"]
+    return imagen_bytes, result["secure_url"]
+
+
+def generar_imagen_bytes(foto_bytes, titulo):
+    """Alias de generar_imagen que devuelve (bytes, url)"""
+    return generar_imagen(foto_bytes, titulo)
 
 
 @app.route("/", methods=["GET"])
@@ -252,6 +258,8 @@ def generar():
     if request.method == "GET":
         titulo = request.args.get("titulo", "").strip()
         foto_url = request.args.get("foto_url", "").strip()
+        # Si el parámetro 'json' está presente, devolver JSON con URL
+        return_json = request.args.get("json", "false").lower() == "true"
         if foto_url:
             try:
                 result = cloudinary.uploader.upload(
@@ -271,8 +279,16 @@ def generar():
         if not foto_bytes:
             return jsonify({"error": "Se requiere foto_url"}), 400
         try:
-            imagen_url = generar_imagen(foto_bytes, titulo)
-            return jsonify({"imagen_url": imagen_url, "ok": True})
+            imagen_bytes, imagen_url = generar_imagen_bytes(foto_bytes, titulo)
+            if return_json:
+                return jsonify({"imagen_url": imagen_url, "ok": True})
+            # Devolver la imagen directamente como binario
+            return send_file(
+                io.BytesIO(imagen_bytes),
+                mimetype='image/jpeg',
+                as_attachment=False,
+                download_name='lared_noticia.jpg'
+            )
         except Exception as e:
             return jsonify({"error": str(e), "ok": False}), 500
 
@@ -331,7 +347,7 @@ def generar():
         return jsonify({"error": "Se requiere la imagen (foto_url, foto_base64, o archivo foto)"}), 400
 
     try:
-        imagen_url = generar_imagen(foto_bytes, titulo)
+        imagen_bytes, imagen_url = generar_imagen(foto_bytes, titulo)
         return jsonify({"imagen_url": imagen_url, "ok": True})
     except Exception as e:
         return jsonify({"error": str(e), "ok": False}), 500
