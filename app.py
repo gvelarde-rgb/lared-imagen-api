@@ -250,7 +250,12 @@ def generar():
 
     content_type = request.content_type or ""
 
-    if "multipart/form-data" in content_type:
+    if "application/octet-stream" in content_type:
+        # Make envía los bytes directamente con el título en el header X-Titulo
+        titulo = request.headers.get("X-Titulo", "").strip()
+        foto_bytes = request.get_data()
+
+    elif "multipart/form-data" in content_type:
         titulo = request.form.get("titulo", "").strip()
         foto_url = request.form.get("foto_url", "").strip()
         if foto_url:
