@@ -1,8 +1,8 @@
 """
 API de generación de imágenes para La Red 106.1
 Endpoint: POST /generar-imagen
-Body (multipart/form-data):
-  - foto: archivo binario de la imagen (enviado por Make)
+Body (application/json o form-data):
+  - foto_url: URL de la imagen del artículo (la API la descarga)
   - titulo: texto del título de la noticia
 Respuesta: { "imagen_url": "https://res.cloudinary.com/..." }
 """
@@ -46,6 +46,23 @@ TEXT_MAX_H = TEXT_AREA_Y2 - TEXT_AREA_Y1   # 220px
 LOGO_CX = W // 2
 LOGO_CY = 1118
 RED = (220, 30, 30, 255)
+
+# Headers de navegador para evitar bloqueos de captcha
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept-Language": "es-GT,es;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://lared1061.com/",
+    "Connection": "keep-alive",
+}
+
+
+def descargar_imagen_url(url):
+    """Descarga una imagen desde una URL usando headers de navegador"""
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+    resp.raise_for_status()
+    return resp.content
 
 
 def recortar_fill(img, tw, th):
@@ -214,14 +231,18 @@ def health():
 @app.route("/generar-imagen", methods=["POST"])
 def generar():
     """
-    Endpoint principal. Acepta dos formatos:
+    Endpoint principal. Acepta tres formatos:
 
-    1. multipart/form-data:
-       - foto: archivo binario de la imagen
+    1. application/json con URL:
+       - foto_url: URL de la imagen (la API la descarga)
        - titulo: texto del título
 
-    2. application/json:
+    2. application/json con base64:
        - foto_base64: imagen codificada en base64
+       - titulo: texto del título
+
+    3. multipart/form-data:
+       - foto: archivo binario de la imagen
        - titulo: texto del título
     """
     titulo = None
@@ -230,18 +251,29 @@ def generar():
     content_type = request.content_type or ""
 
     if "multipart/form-data" in content_type:
-        # Make envía la imagen como archivo binario
         titulo = request.form.get("titulo", "").strip()
-        if "foto" not in request.files:
-            return jsonify({"error": "Se requiere el campo 'foto' como archivo"}), 400
-        foto_bytes = request.files["foto"].read()
+        foto_url = request.form.get("foto_url", "").strip()
+        if foto_url:
+            foto_bytes = descargar_imagen_url(foto_url)
+        elif "foto" in request.files:
+            foto_bytes = request.files["foto"].read()
 
-    elif "application/json" in content_type:
-        data = request.get_json(force=True)
+    elif "application/x-www-form-urlencoded" in content_type:
+        titulo = request.form.get("titulo", "").strip()
+        foto_url = request.form.get("foto_url", "").strip()
+        if foto_url:
+            foto_bytes = descargar_imagen_url(foto_url)
+
+    else:
+        # JSON (por defecto)
+        data = request.get_json(force=True) or {}
         titulo = data.get("titulo", "").strip()
+        foto_url = data.get("foto_url", "").strip()
         foto_b64 = data.get("foto_base64", "").strip()
-        if foto_b64:
-            # Remover prefijo data:image/...;base64, si existe
+
+        if foto_url:
+            foto_bytes = descargar_imagen_url(foto_url)
+        elif foto_b64:
             if "," in foto_b64:
                 foto_b64 = foto_b64.split(",", 1)[1]
             foto_bytes = base64.b64decode(foto_b64)
@@ -249,7 +281,7 @@ def generar():
     if not titulo:
         return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
     if not foto_bytes:
-        return jsonify({"error": "Se requiere la imagen (campo 'foto' en multipart o 'foto_base64' en JSON)"}), 400
+        return jsonify({"error": "Se requiere la imagen (foto_url, foto_base64, o archivo foto)"}), 400
 
     try:
         imagen_url = generar_imagen(foto_bytes, titulo)
