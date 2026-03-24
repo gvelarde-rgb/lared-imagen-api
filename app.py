@@ -1,7 +1,9 @@
 """
 API de generación de imágenes para La Red 106.1
 Endpoint: POST /generar-imagen
-Body: { "foto_url": "...", "titulo": "..." }
+Body (multipart/form-data):
+  - foto: archivo binario de la imagen (enviado por Make)
+  - titulo: texto del título de la noticia
 Respuesta: { "imagen_url": "https://res.cloudinary.com/..." }
 """
 
@@ -13,6 +15,7 @@ import cloudinary
 import cloudinary.uploader
 import os
 import hashlib
+import base64
 
 app = Flask(__name__)
 
@@ -43,17 +46,6 @@ TEXT_MAX_H = TEXT_AREA_Y2 - TEXT_AREA_Y1   # 220px
 LOGO_CX = W // 2
 LOGO_CY = 1118
 RED = (220, 30, 30, 255)
-
-
-def cargar_imagen_url(url):
-    """Descarga una imagen desde una URL y la devuelve como PIL Image RGBA"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-    }
-    resp = requests.get(url, timeout=30, headers=headers)
-    resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
 
 
 def recortar_fill(img, tw, th):
@@ -88,7 +80,7 @@ def wrap_text_pixels(draw, texto, font, max_width):
     return lines
 
 
-def generar_imagen(foto_url, titulo):
+def generar_imagen(foto_bytes, titulo):
     """
     Genera la imagen de la noticia con:
     - Foto de fondo recortada a 1080x1350
@@ -99,7 +91,7 @@ def generar_imagen(foto_url, titulo):
     Devuelve la URL pública de Cloudinary.
     """
     # 1. Cargar y recortar foto de fondo
-    foto = cargar_imagen_url(foto_url)
+    foto = Image.open(io.BytesIO(foto_bytes)).convert("RGBA")
     fondo = recortar_fill(foto, W, H)
 
     # 2. Crear capa de overlay (panel + corchetes + logo)
@@ -222,20 +214,45 @@ def health():
 @app.route("/generar-imagen", methods=["POST"])
 def generar():
     """
-    Endpoint principal.
-    Recibe: { "foto_url": "...", "titulo": "..." }
-    Devuelve: { "imagen_url": "https://res.cloudinary.com/..." }
+    Endpoint principal. Acepta dos formatos:
+
+    1. multipart/form-data:
+       - foto: archivo binario de la imagen
+       - titulo: texto del título
+
+    2. application/json:
+       - foto_base64: imagen codificada en base64
+       - titulo: texto del título
     """
-    data = request.get_json(force=True)
+    titulo = None
+    foto_bytes = None
 
-    foto_url = data.get("foto_url", "").strip()
-    titulo = data.get("titulo", "").strip()
+    content_type = request.content_type or ""
 
-    if not foto_url or not titulo:
-        return jsonify({"error": "Se requieren 'foto_url' y 'titulo'"}), 400
+    if "multipart/form-data" in content_type:
+        # Make envía la imagen como archivo binario
+        titulo = request.form.get("titulo", "").strip()
+        if "foto" not in request.files:
+            return jsonify({"error": "Se requiere el campo 'foto' como archivo"}), 400
+        foto_bytes = request.files["foto"].read()
+
+    elif "application/json" in content_type:
+        data = request.get_json(force=True)
+        titulo = data.get("titulo", "").strip()
+        foto_b64 = data.get("foto_base64", "").strip()
+        if foto_b64:
+            # Remover prefijo data:image/...;base64, si existe
+            if "," in foto_b64:
+                foto_b64 = foto_b64.split(",", 1)[1]
+            foto_bytes = base64.b64decode(foto_b64)
+
+    if not titulo:
+        return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
+    if not foto_bytes:
+        return jsonify({"error": "Se requiere la imagen (campo 'foto' en multipart o 'foto_base64' en JSON)"}), 400
 
     try:
-        imagen_url = generar_imagen(foto_url, titulo)
+        imagen_url = generar_imagen(foto_bytes, titulo)
         return jsonify({"imagen_url": imagen_url, "ok": True})
     except Exception as e:
         return jsonify({"error": str(e), "ok": False}), 500
