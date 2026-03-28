@@ -3,6 +3,6 @@ __pycache__/
 *.pyo
 .env
 *.jpg
-*.png
+# *.png excluido para permitir logo_lared.png
 venv/
 .venv/

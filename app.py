@@ -47,6 +47,20 @@ LOGO_CX = W // 2
 LOGO_CY = 1118
 RED = (220, 30, 30, 255)
 
+# Ruta al logo real
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo_lared.png")
+
+# Cache del logo en memoria (se carga una sola vez)
+_logo_cache = None
+
+
+def get_logo():
+    """Carga el logo real desde disco y lo cachea en memoria."""
+    global _logo_cache
+    if _logo_cache is None:
+        _logo_cache = Image.open(LOGO_PATH).convert("RGBA")
+    return _logo_cache
+
 # Headers de navegador para evitar bloqueos de captcha
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -104,7 +118,7 @@ def generar_imagen(foto_bytes, titulo):
     - Panel blanco semitransparente
     - Corchetes rojos decorativos
     - Título de la noticia en negrita centrado
-    - Logo LAR=D 106.1 en pastilla roja
+    - Logo real de La Red 106.1 (PNG con transparencia)
     Devuelve la URL pública de Cloudinary.
     """
     # 1. Cargar y recortar foto de fondo
@@ -127,21 +141,23 @@ def generar_imagen(foto_bytes, titulo):
     draw.rectangle([(bx2 - BTHICK, by2 - BLEN), (bx2, by2)], fill=RED)
     draw.rectangle([(bx2 - BLEN, by2 - BTHICK), (bx2, by2)], fill=RED)
 
-    # Logo pastilla roja
-    LOGO_W, LOGO_H_SIZE, LOGO_R = 380, 92, 46
-    lx1 = LOGO_CX - LOGO_W // 2
-    ly1 = LOGO_CY - LOGO_H_SIZE // 2
-    lx2 = LOGO_CX + LOGO_W // 2
-    ly2 = LOGO_CY + LOGO_H_SIZE // 2
-    draw.rectangle([(lx1 + LOGO_R, ly1), (lx2 - LOGO_R, ly2)], fill=RED)
-    draw.rectangle([(lx1, ly1 + LOGO_R), (lx2, ly2 - LOGO_R)], fill=RED)
-    draw.ellipse([(lx1, ly1), (lx1 + 2 * LOGO_R, ly1 + 2 * LOGO_R)], fill=RED)
-    draw.ellipse([(lx2 - 2 * LOGO_R, ly1), (lx2, ly1 + 2 * LOGO_R)], fill=RED)
-    draw.ellipse([(lx1, ly2 - 2 * LOGO_R), (lx1 + 2 * LOGO_R, ly2)], fill=RED)
-    draw.ellipse([(lx2 - 2 * LOGO_R, ly2 - 2 * LOGO_R), (lx2, ly2)], fill=RED)
+    # (logo PNG se pega después de alpha_composite — ver más abajo)
 
     # 3. Componer fondo + overlay
     canvas = Image.alpha_composite(fondo, overlay)
+
+    # 3b. Pegar logo real (PNG con transparencia)
+    logo = get_logo().copy()
+    LOGO_TARGET_W = 340  # ancho del logo en la imagen final
+    ratio = LOGO_TARGET_W / logo.width
+    logo_resized = logo.resize(
+        (LOGO_TARGET_W, int(logo.height * ratio)),
+        Image.LANCZOS,
+    )
+    lx = (W - logo_resized.width) // 2
+    ly = LOGO_CY - logo_resized.height // 2
+    canvas.paste(logo_resized, (lx, ly), logo_resized)  # alpha del PNG como máscara
+
     draw_final = ImageDraw.Draw(canvas)
 
     # 4. Calcular fuente y líneas del título
@@ -189,23 +205,7 @@ def generar_imagen(foto_bytes, titulo):
         ty = text_y + i * (lh_real + spacing)
         draw_final.text((tx, ty), line, fill=(20, 20, 20, 255), font=font)
 
-    # 5. Texto del logo
-    try:
-        font_logo = ImageFont.truetype(FONT_PATH, 56)
-    except OSError:
-        font_logo = ImageFont.load_default()
-    logo_text = "LAR =D 106.1"
-    bbox = draw_final.textbbox((0, 0), logo_text, font=font_logo)
-    tw_logo = bbox[2] - bbox[0]
-    th_logo = bbox[3] - bbox[1]
-    draw_final.text(
-        (LOGO_CX - tw_logo // 2, LOGO_CY - th_logo // 2 - 2),
-        logo_text,
-        fill=(255, 255, 255, 255),
-        font=font_logo,
-    )
-
-    # 6. Guardar en buffer
+    # 5. Guardar en buffer
     buffer = io.BytesIO()
     canvas.convert("RGB").save(buffer, "JPEG", quality=92)
     buffer.seek(0)
