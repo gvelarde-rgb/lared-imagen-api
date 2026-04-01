@@ -74,8 +74,18 @@ BROWSER_HEADERS = {
 
 def descargar_imagen_url(url):
     """Descarga una imagen desde una URL usando headers de navegador"""
-    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15, allow_redirects=True)
     resp.raise_for_status()
+
+    content_type = resp.headers.get("Content-Type", "")
+    if not content_type.startswith("image/"):
+        raise ValueError(
+            f"URL no devolvió imagen. Content-Type: {content_type!r} — URL: {url}"
+        )
+    if len(resp.content) < 500:
+        raise ValueError(
+            f"Imagen demasiado pequeña o vacía ({len(resp.content)} bytes) — URL: {url}"
+        )
     return resp.content
 
 
@@ -122,7 +132,12 @@ def generar_imagen(foto_bytes, titulo):
     Devuelve la URL pública de Cloudinary.
     """
     # 1. Cargar y recortar foto de fondo
-    foto = Image.open(io.BytesIO(foto_bytes)).convert("RGBA")
+    try:
+        foto = Image.open(io.BytesIO(foto_bytes)).convert("RGBA")
+    except Exception as pil_err:
+        raise ValueError(
+            f"Pillow no pudo abrir la imagen ({len(foto_bytes)} bytes): {pil_err}"
+        ) from pil_err
     fondo = recortar_fill(foto, W, H)
 
     # 2. Crear capa de overlay (panel + corchetes + logo)
@@ -269,10 +284,14 @@ def generar():
                     resource_type="image"
                 )
                 cloudinary_url = result["secure_url"]
-                resp = requests.get(cloudinary_url, timeout=30)
+                resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=15)
                 resp.raise_for_status()
+                content_type = resp.headers.get("Content-Type", "")
+                if not content_type.startswith("image/"):
+                    raise ValueError(f"Cloudinary devolvió Content-Type: {content_type!r}")
                 foto_bytes = resp.content
             except Exception:
+                # Fallback: descarga directa (descargar_imagen_url ya valida Content-Type)
                 foto_bytes = descargar_imagen_url(foto_url)
         if not titulo:
             return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
@@ -289,6 +308,8 @@ def generar():
                 as_attachment=False,
                 download_name='lared_noticia.jpg'
             )
+        except ValueError as e:
+            return jsonify({"error": str(e), "ok": False}), 400
         except Exception as e:
             return jsonify({"error": str(e), "ok": False}), 500
 
