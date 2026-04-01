@@ -258,13 +258,18 @@ def generar_imagen(foto_bytes, titulo):
     titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
     public_id = f"lared/noticia_{titulo_hash}"
     buffer.seek(0)
-    result = cloudinary.uploader.upload(
-        buffer,
-        public_id=public_id,
-        overwrite=True,
-        resource_type="image",
-    )
-    return imagen_bytes, result["secure_url"]
+    try:
+        result = cloudinary.uploader.upload(
+            buffer,
+            public_id=public_id,
+            overwrite=True,
+            resource_type="image",
+            timeout=20  # máximo 20 segundos para no exceder timeout de Make
+        )
+    except Exception as e:
+        # Si Cloudinary falla, devolver la imagen en base64 en lugar de fallar
+        # Esto permite que Make siga aunque Cloudinary esté lento
+        return imagen_bytes, "data:image/jpeg;base64," + base64.b64encode(imagen_bytes).decode()
 
 
 def generar_imagen_sin_foto(titulo):
@@ -446,12 +451,16 @@ def generar():
             img_sin_foto.save(buf, "JPEG", quality=92)
             buf.seek(0)
             titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
-            result = cloudinary.uploader.upload(
-                buf, public_id=f"lared/noticia_{titulo_hash}",
-                overwrite=True, resource_type="image"
-            )
-            imagen_url = result["secure_url"]
-            buf.seek(0)
+            try:
+                result = cloudinary.uploader.upload(
+                    buf, public_id=f"lared/noticia_{titulo_hash}",
+                    overwrite=True, resource_type="image", timeout=20
+                )
+                imagen_url = result["secure_url"]
+            except Exception:
+                # Fallback: devolver como base64 si Cloudinary falla
+                buf.seek(0)
+                imagen_url = "data:image/jpeg;base64," + base64.b64encode(buf.read()).decode()
             if return_json:
                 return jsonify({"imagen_url": imagen_url, "ok": True})
             buf.seek(0)
@@ -518,11 +527,17 @@ def generar():
         img_sin_foto.save(buf, "JPEG", quality=92)
         buf.seek(0)
         titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
-        result = cloudinary.uploader.upload(
-            buf, public_id=f"lared/noticia_{titulo_hash}",
-            overwrite=True, resource_type="image"
-        )
-        return jsonify({"imagen_url": result["secure_url"], "ok": True})
+        try:
+            result = cloudinary.uploader.upload(
+                buf, public_id=f"lared/noticia_{titulo_hash}",
+                overwrite=True, resource_type="image", timeout=20
+            )
+            imagen_url = result["secure_url"]
+        except Exception:
+            # Fallback: base64 si Cloudinary falla
+            buf.seek(0)
+            imagen_url = "data:image/jpeg;base64," + base64.b64encode(buf.read()).decode()
+        return jsonify({"imagen_url": imagen_url, "ok": True})
 
     try:
         imagen_bytes, imagen_url = generar_imagen(foto_bytes, titulo)
