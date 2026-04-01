@@ -279,11 +279,11 @@ def generar_imagen_sin_foto(titulo):
     RED_FILL = (220, 30, 30, 255)
 
     # --- Pre-calcular tamaño del texto para centrar todo el bloque verticalmente ---
-    text_max_w = W - 160
-    font_size = 80
+    text_max_w = W - 120  # más ancho: 60px margen cada lado
+    font_size = 96  # arranca más grande
     font = None
     lines = []
-    while font_size >= 36:
+    while font_size >= 48:
         try:
             f = ImageFont.truetype(FONT_PATH, font_size)
         except OSError:
@@ -293,14 +293,14 @@ def generar_imagen_sin_foto(titulo):
         lh = bbox_a[3] - bbox_a[1]
         spacing = int(lh * 0.22)
         total_h = len(ls) * lh + max(0, len(ls) - 1) * spacing
-        if total_h <= H * 0.55:   # texto no ocupa más del 55% de la imagen
+        if total_h <= H * 0.45:   # texto no ocupa más del 45% del alto
             font = f
             lines = ls
             break
         font_size -= 4
     if font is None:
         try:
-            font = ImageFont.truetype(FONT_PATH, 36)
+            font = ImageFont.truetype(FONT_PATH, 48)
         except OSError:
             font = ImageFont.load_default()
         lines = wrap_text_pixels(draw, titulo, font, text_max_w)
@@ -310,15 +310,15 @@ def generar_imagen_sin_foto(titulo):
     spacing = int(lh_real * 0.22)
     total_text_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
 
-    # --- Logo ---
+    # --- Logo grande ---
     logo = get_logo().copy()
-    LOGO_W = 340
+    LOGO_W = 520  # logo más grande
     ratio = LOGO_W / logo.width
     logo_r = logo.resize((LOGO_W, int(logo.height * ratio)), Image.LANCZOS)
 
-    GAP = 70  # espacio entre logo y texto
+    GAP = 80  # espacio entre logo y texto
     block_h = logo_r.height + GAP + total_text_h
-    block_y = (H - block_h) // 2  # centrado matemático exacto
+    block_y = (H - block_h) // 2  # centrado exacto
 
     lx = (W - logo_r.width) // 2
     ly = block_y
