@@ -267,6 +267,43 @@ def generar_imagen(foto_bytes, titulo):
     return imagen_bytes, result["secure_url"]
 
 
+def generar_fondo_fallback():
+    """Genera un fondo sólido rojo oscuro cuando no hay foto disponible."""
+    img = Image.new("RGBA", (W, H), (30, 30, 30, 255))
+    draw = ImageDraw.Draw(img)
+    # Gradiente simulado: franja roja en la parte superior
+    draw.rectangle([(0, 0), (W, H // 2)], fill=(180, 20, 20, 255))
+    return img.tobytes(), img
+
+
+def get_foto_bytes(foto_url):
+    """
+    Descarga foto_url. Si está vacío o falla, devuelve None
+    (el llamador decide qué hacer).
+    """
+    if not foto_url:
+        return None
+    try:
+        result = cloudinary.uploader.upload(
+            foto_url,
+            public_id="lared/temp_foto",
+            overwrite=True,
+            resource_type="image"
+        )
+        cloudinary_url = result["secure_url"]
+        resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=15)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            raise ValueError(f"Cloudinary Content-Type inválido: {content_type!r}")
+        return resp.content
+    except Exception:
+        try:
+            return descargar_imagen_url(foto_url)
+        except Exception:
+            return None
+
+
 def generar_imagen_bytes(foto_bytes, titulo):
     """Alias de generar_imagen que devuelve (bytes, url)"""
     return generar_imagen(foto_bytes, titulo)
@@ -301,35 +338,24 @@ def generar():
     if request.method == "GET":
         titulo = request.args.get("titulo", "").strip()
         foto_url = request.args.get("foto_url", "").strip()
-        # Si el parámetro 'json' está presente, devolver JSON con URL
         return_json = request.args.get("json", "false").lower() == "true"
-        if foto_url:
-            try:
-                result = cloudinary.uploader.upload(
-                    foto_url,
-                    public_id="lared/temp_foto",
-                    overwrite=True,
-                    resource_type="image"
-                )
-                cloudinary_url = result["secure_url"]
-                resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=15)
-                resp.raise_for_status()
-                content_type = resp.headers.get("Content-Type", "")
-                if not content_type.startswith("image/"):
-                    raise ValueError(f"Cloudinary devolvió Content-Type: {content_type!r}")
-                foto_bytes = resp.content
-            except Exception:
-                # Fallback: descarga directa (descargar_imagen_url ya valida Content-Type)
-                foto_bytes = descargar_imagen_url(foto_url)
+
         if not titulo:
             return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
+
+        foto_bytes = get_foto_bytes(foto_url)
+
+        # Si no hay foto (URL vacía o falló la descarga), usar fondo de marca
         if not foto_bytes:
-            return jsonify({"error": "Se requiere foto_url"}), 400
+            _, fondo_img = generar_fondo_fallback()
+            buf = io.BytesIO()
+            fondo_img.convert("RGB").save(buf, "JPEG", quality=85)
+            foto_bytes = buf.getvalue()
+
         try:
             imagen_bytes, imagen_url = generar_imagen_bytes(foto_bytes, titulo)
             if return_json:
                 return jsonify({"imagen_url": imagen_url, "ok": True})
-            # Devolver la imagen directamente como binario
             return send_file(
                 io.BytesIO(imagen_bytes),
                 mimetype='image/jpeg',
@@ -370,21 +396,7 @@ def generar():
         foto_b64 = data.get("foto_base64", "").strip()
 
         if foto_url:
-            # Intentar descargar via Cloudinary primero (evita captcha)
-            try:
-                result = cloudinary.uploader.upload(
-                    foto_url,
-                    public_id="lared/temp_foto",
-                    overwrite=True,
-                    resource_type="image"
-                )
-                cloudinary_url = result["secure_url"]
-                resp = requests.get(cloudinary_url, timeout=30)
-                resp.raise_for_status()
-                foto_bytes = resp.content
-            except Exception:
-                # Fallback: descarga directa
-                foto_bytes = descargar_imagen_url(foto_url)
+            foto_bytes = get_foto_bytes(foto_url)
         elif foto_b64:
             if "," in foto_b64:
                 foto_b64 = foto_b64.split(",", 1)[1]
@@ -392,8 +404,13 @@ def generar():
 
     if not titulo:
         return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
+
+    # Si no hay foto, usar fondo de marca en lugar de fallar
     if not foto_bytes:
-        return jsonify({"error": "Se requiere la imagen (foto_url, foto_base64, o archivo foto)"}), 400
+        _, fondo_img = generar_fondo_fallback()
+        buf = io.BytesIO()
+        fondo_img.convert("RGB").save(buf, "JPEG", quality=85)
+        foto_bytes = buf.getvalue()
 
     try:
         imagen_bytes, imagen_url = generar_imagen(foto_bytes, titulo)
