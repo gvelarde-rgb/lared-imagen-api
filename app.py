@@ -310,11 +310,23 @@ def generar_imagen_sin_foto(titulo):
     spacing = int(lh_real * 0.22)
     total_text_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
 
-    # --- Logo: limitar por alto para no ocupar demasiado espacio ---
+    # --- Logo: recortar transparencia y escalar al tamaño visible deseado ---
     logo = get_logo().copy()
-    LOGO_H_MAX = 220  # alto máximo del logo
-    ratio = LOGO_H_MAX / logo.height
-    logo_r = logo.resize((int(logo.width * ratio), LOGO_H_MAX), Image.LANCZOS)
+    # Recortar al bounding box del contenido visible (elimina padding transparente)
+    import numpy as np
+    arr = np.array(logo)
+    alpha_ch = arr[:, :, 3]
+    rows_vis = np.any(alpha_ch > 10, axis=1)
+    cols_vis = np.any(alpha_ch > 10, axis=0)
+    rmin, rmax = np.where(rows_vis)[0][[0, -1]]
+    cmin, cmax = np.where(cols_vis)[0][[0, -1]]
+    logo_crop = logo.crop((cmin, rmin, cmax + 1, rmax + 1))
+    # Escalar: ancho fijo de 500px
+    LOGO_TARGET_W = 500
+    ratio = LOGO_TARGET_W / logo_crop.width
+    logo_r = logo_crop.resize(
+        (LOGO_TARGET_W, int(logo_crop.height * ratio)), Image.LANCZOS
+    )
 
     GAP = 80  # espacio entre logo y texto
     block_h = logo_r.height + GAP + total_text_h
