@@ -72,6 +72,28 @@ BROWSER_HEADERS = {
 }
 
 
+def avif_to_jpeg_bytes(raw_bytes):
+    """Convierte AVIF → JPEG usando ffmpeg (cuando Pillow no soporta AVIF nativo)"""
+    import subprocess, tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".avif", delete=False) as f_in:
+        f_in.write(raw_bytes)
+        f_in_path = f_in.name
+    f_out_path = f_in_path.replace(".avif", ".jpg")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", f_in_path, "-q:v", "2", f_out_path],
+            check=True, capture_output=True, timeout=20
+        )
+        with open(f_out_path, "rb") as fout:
+            return fout.read()
+    finally:
+        for p in [f_in_path, f_out_path]:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+
+
 def descargar_imagen_url(url):
     """Descarga una imagen desde una URL usando headers de navegador"""
     resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15, allow_redirects=True)
@@ -135,9 +157,15 @@ def generar_imagen(foto_bytes, titulo):
     try:
         foto = Image.open(io.BytesIO(foto_bytes)).convert("RGBA")
     except Exception as pil_err:
-        raise ValueError(
-            f"Pillow no pudo abrir la imagen ({len(foto_bytes)} bytes): {pil_err}"
-        ) from pil_err
+        # Fallback: convertir con ffmpeg (necesario para AVIF en python:3.11-slim)
+        try:
+            jpeg_bytes = avif_to_jpeg_bytes(foto_bytes)
+            foto = Image.open(io.BytesIO(jpeg_bytes)).convert("RGBA")
+        except Exception as ffmpeg_err:
+            raise ValueError(
+                f"No se pudo abrir la imagen ({len(foto_bytes)} bytes). "
+                f"Pillow: {pil_err} | ffmpeg: {ffmpeg_err}"
+            ) from pil_err
     fondo = recortar_fill(foto, W, H)
 
     # 2. Crear capa de overlay (panel + corchetes + logo)
