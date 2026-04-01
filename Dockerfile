@@ -3,6 +3,7 @@ FROM python:3.11-slim
 # Instalar fuentes Liberation (equivalente a Arial/Helvetica)
 RUN apt-get update && apt-get install -y \
     fonts-liberation \
+    libavif-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
