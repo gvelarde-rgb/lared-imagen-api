@@ -310,11 +310,11 @@ def generar_imagen_sin_foto(titulo):
     spacing = int(lh_real * 0.22)
     total_text_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
 
-    # --- Logo grande ---
+    # --- Logo: limitar por alto para no ocupar demasiado espacio ---
     logo = get_logo().copy()
-    LOGO_W = 520  # logo más grande
-    ratio = LOGO_W / logo.width
-    logo_r = logo.resize((LOGO_W, int(logo.height * ratio)), Image.LANCZOS)
+    LOGO_H_MAX = 220  # alto máximo del logo
+    ratio = LOGO_H_MAX / logo.height
+    logo_r = logo.resize((int(logo.width * ratio), LOGO_H_MAX), Image.LANCZOS)
 
     GAP = 80  # espacio entre logo y texto
     block_h = logo_r.height + GAP + total_text_h
