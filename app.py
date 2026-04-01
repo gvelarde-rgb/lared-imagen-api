@@ -310,17 +310,14 @@ def generar_imagen_sin_foto(titulo):
     spacing = int(lh_real * 0.22)
     total_text_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
 
-    # --- Logo: recortar transparencia y escalar al tamaño visible deseado ---
+    # --- Logo: recortar padding transparente con Pillow, escalar grande ---
     logo = get_logo().copy()
-    # Recortar al bounding box del contenido visible (elimina padding transparente)
-    import numpy as np
-    arr = np.array(logo)
-    alpha_ch = arr[:, :, 3]
-    rows_vis = np.any(alpha_ch > 10, axis=1)
-    cols_vis = np.any(alpha_ch > 10, axis=0)
-    rmin, rmax = np.where(rows_vis)[0][[0, -1]]
-    cmin, cmax = np.where(cols_vis)[0][[0, -1]]
-    logo_crop = logo.crop((cmin, rmin, cmax + 1, rmax + 1))
+    # getbbox() devuelve el bounding box del contenido no-transparente
+    bbox_logo = logo.getbbox()  # (left, upper, right, lower)
+    if bbox_logo:
+        logo_crop = logo.crop(bbox_logo)
+    else:
+        logo_crop = logo
     # Escalar: ancho fijo de 500px
     LOGO_TARGET_W = 500
     ratio = LOGO_TARGET_W / logo_crop.width
