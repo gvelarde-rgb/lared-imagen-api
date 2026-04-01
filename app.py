@@ -318,7 +318,7 @@ def generar_imagen_sin_foto(titulo):
 
     GAP = 70  # espacio entre logo y texto
     block_h = logo_r.height + GAP + total_text_h
-    block_y = (H - block_h) // 2   # bloque logo+texto centrado en la imagen
+    block_y = max(80, (H - block_h) // 2 - 60)  # ligeramente sobre el centro
 
     lx = (W - logo_r.width) // 2
     ly = block_y
