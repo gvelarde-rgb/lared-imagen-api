@@ -267,13 +267,98 @@ def generar_imagen(foto_bytes, titulo):
     return imagen_bytes, result["secure_url"]
 
 
-def generar_fondo_fallback():
-    """Genera un fondo sólido rojo oscuro cuando no hay foto disponible."""
-    img = Image.new("RGBA", (W, H), (30, 30, 30, 255))
-    draw = ImageDraw.Draw(img)
-    # Gradiente simulado: franja roja en la parte superior
-    draw.rectangle([(0, 0), (W, H // 2)], fill=(180, 20, 20, 255))
-    return img.tobytes(), img
+def generar_imagen_sin_foto(titulo):
+    """
+    Genera imagen completa cuando no hay foto disponible:
+    fondo blanco, logo centrado arriba, título grande centrado,
+    corchetes rojos decorativos.
+    """
+    canvas = Image.new("RGBA", (W, H), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+
+    RED_FILL = (220, 30, 30, 255)
+
+    # --- Logo centrado en el tercio superior ---
+    logo = get_logo().copy()
+    LOGO_W = 380
+    ratio = LOGO_W / logo.width
+    logo_r = logo.resize((LOGO_W, int(logo.height * ratio)), Image.LANCZOS)
+    lx = (W - logo_r.width) // 2
+    ly = 120
+    canvas.paste(logo_r, (lx, ly), logo_r)
+
+    logo_bottom = ly + logo_r.height + 60  # margen debajo del logo
+
+    # --- Área de texto: desde logo_bottom hasta casi abajo ---
+    text_area_y1 = logo_bottom
+    text_area_y2 = H - 120
+    text_max_w = W - 160  # 80px margen cada lado
+
+    # Calcular fuente más grande que quepa
+    font_size = 80
+    font = None
+    lines = []
+    while font_size >= 36:
+        try:
+            f = ImageFont.truetype(FONT_PATH, font_size)
+        except OSError:
+            f = ImageFont.load_default()
+        ls = wrap_text_pixels(draw, titulo, f, text_max_w)
+        bbox = draw.textbbox((0, 0), "A", font=f)
+        lh = bbox[3] - bbox[1]
+        spacing = int(lh * 0.22)
+        total_h = len(ls) * lh + max(0, len(ls) - 1) * spacing
+        if total_h <= (text_area_y2 - text_area_y1):
+            font = f
+            lines = ls
+            break
+        font_size -= 4
+
+    if font is None:
+        try:
+            font = ImageFont.truetype(FONT_PATH, 36)
+        except OSError:
+            font = ImageFont.load_default()
+        lines = wrap_text_pixels(draw, titulo, font, text_max_w)
+
+    # Medir altura real del bloque de texto
+    bbox0 = draw.textbbox((0, 0), "A", font=font)
+    lh_real = bbox0[3] - bbox0[1]
+    spacing = int(lh_real * 0.22)
+    total_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
+
+    # Centrar verticalmente en el área disponible
+    text_y = text_area_y1 + (text_area_y2 - text_area_y1 - total_h) // 2
+
+    # Corchetes rojos alrededor del texto
+    pad = 30
+    bx1 = (W - text_max_w) // 2 - pad
+    by1 = text_y - pad
+    bx2 = bx1 + text_max_w + pad * 2
+    by2 = text_y + total_h + pad
+    BLEN, BTHICK = 55, 8
+    # TL
+    draw.rectangle([(bx1, by1), (bx1 + BLEN, by1 + BTHICK)], fill=RED_FILL)
+    draw.rectangle([(bx1, by1), (bx1 + BTHICK, by1 + BLEN)], fill=RED_FILL)
+    # TR
+    draw.rectangle([(bx2 - BLEN, by1), (bx2, by1 + BTHICK)], fill=RED_FILL)
+    draw.rectangle([(bx2 - BTHICK, by1), (bx2, by1 + BLEN)], fill=RED_FILL)
+    # BL
+    draw.rectangle([(bx1, by2 - BTHICK), (bx1 + BLEN, by2)], fill=RED_FILL)
+    draw.rectangle([(bx1, by2 - BLEN), (bx1 + BTHICK, by2)], fill=RED_FILL)
+    # BR
+    draw.rectangle([(bx2 - BLEN, by2 - BTHICK), (bx2, by2)], fill=RED_FILL)
+    draw.rectangle([(bx2 - BTHICK, by2 - BLEN), (bx2, by2)], fill=RED_FILL)
+
+    # Texto
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        tw = bbox[2] - bbox[0]
+        tx = (W - tw) // 2
+        ty = text_y + i * (lh_real + spacing)
+        draw.text((tx, ty), line, fill=(20, 20, 20, 255), font=font)
+
+    return canvas.convert("RGB")
 
 
 def get_foto_bytes(foto_url):
@@ -345,12 +430,24 @@ def generar():
 
         foto_bytes = get_foto_bytes(foto_url)
 
-        # Si no hay foto (URL vacía o falló la descarga), usar fondo de marca
+        # Si no hay foto (URL vacía o falló la descarga), generar imagen solo-texto
         if not foto_bytes:
-            _, fondo_img = generar_fondo_fallback()
+            img_sin_foto = generar_imagen_sin_foto(titulo)
             buf = io.BytesIO()
-            fondo_img.convert("RGB").save(buf, "JPEG", quality=85)
-            foto_bytes = buf.getvalue()
+            img_sin_foto.save(buf, "JPEG", quality=92)
+            buf.seek(0)
+            titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
+            result = cloudinary.uploader.upload(
+                buf, public_id=f"lared/noticia_{titulo_hash}",
+                overwrite=True, resource_type="image"
+            )
+            imagen_url = result["secure_url"]
+            buf.seek(0)
+            if return_json:
+                return jsonify({"imagen_url": imagen_url, "ok": True})
+            buf.seek(0)
+            return send_file(io.BytesIO(buf.getvalue()), mimetype='image/jpeg',
+                             as_attachment=False, download_name='lared_noticia.jpg')
 
         try:
             imagen_bytes, imagen_url = generar_imagen_bytes(foto_bytes, titulo)
@@ -405,12 +502,18 @@ def generar():
     if not titulo:
         return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
 
-    # Si no hay foto, usar fondo de marca en lugar de fallar
+    # Si no hay foto, generar imagen solo-texto (fondo blanco, texto centrado)
     if not foto_bytes:
-        _, fondo_img = generar_fondo_fallback()
+        img_sin_foto = generar_imagen_sin_foto(titulo)
         buf = io.BytesIO()
-        fondo_img.convert("RGB").save(buf, "JPEG", quality=85)
-        foto_bytes = buf.getvalue()
+        img_sin_foto.save(buf, "JPEG", quality=92)
+        buf.seek(0)
+        titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
+        result = cloudinary.uploader.upload(
+            buf, public_id=f"lared/noticia_{titulo_hash}",
+            overwrite=True, resource_type="image"
+        )
+        return jsonify({"imagen_url": result["secure_url"], "ok": True})
 
     try:
         imagen_bytes, imagen_url = generar_imagen(foto_bytes, titulo)
