@@ -264,12 +264,12 @@ def generar_imagen(foto_bytes, titulo):
             public_id=public_id,
             overwrite=True,
             resource_type="image",
-            timeout=20  # máximo 20 segundos para no exceder timeout de Make
+            timeout=30  # 30s máximo (deja margen antes de timeout 40s de Make)
         )
+        return imagen_bytes, result["secure_url"]
     except Exception as e:
-        # Si Cloudinary falla, devolver la imagen en base64 en lugar de fallar
-        # Esto permite que Make siga aunque Cloudinary esté lento
-        return imagen_bytes, "data:image/jpeg;base64," + base64.b64encode(imagen_bytes).decode()
+        app.logger.error(f"Cloudinary upload failed: {str(e)[:100]}")
+        raise ValueError(f"Cloudinary timeout/error: {str(e)[:50]}") from e
 
 
 def generar_imagen_sin_foto(titulo):
@@ -377,30 +377,35 @@ def generar_imagen_sin_foto(titulo):
 
 def get_foto_bytes(foto_url):
     """
-    Descarga foto_url. Si está vacío o falla, devuelve None
-    (el llamador decide qué hacer).
+    Descarga foto_url con reintentos y fallback robusto.
+    Si está vacío o falla, devuelve None (el llamador usa fondo blanco).
     """
     if not foto_url:
         return None
+    
+    # Intentar descarga directa primero (más rápido)
+    try:
+        foto_bytes = descargar_imagen_url(foto_url)
+        return foto_bytes
+    except Exception as e1:
+        app.logger.warning(f"Descarga directa falló: {str(e1)[:50]}")
+    
+    # Fallback: usar Cloudinary fetch (puede ser lento)
     try:
         result = cloudinary.uploader.upload(
             foto_url,
             public_id="lared/temp_foto",
             overwrite=True,
-            resource_type="image"
+            resource_type="image",
+            timeout=15
         )
         cloudinary_url = result["secure_url"]
         resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=15)
         resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "")
-        if not content_type.startswith("image/"):
-            raise ValueError(f"Cloudinary Content-Type inválido: {content_type!r}")
         return resp.content
-    except Exception:
-        try:
-            return descargar_imagen_url(foto_url)
-        except Exception:
-            return None
+    except Exception as e2:
+        app.logger.warning(f"Cloudinary fetch falló: {str(e2)[:50]}")
+        return None
 
 
 def generar_imagen_bytes(foto_bytes, titulo):
@@ -454,13 +459,12 @@ def generar():
             try:
                 result = cloudinary.uploader.upload(
                     buf, public_id=f"lared/noticia_{titulo_hash}",
-                    overwrite=True, resource_type="image", timeout=20
+                    overwrite=True, resource_type="image", timeout=30
                 )
                 imagen_url = result["secure_url"]
-            except Exception:
-                # Fallback: devolver como base64 si Cloudinary falla
-                buf.seek(0)
-                imagen_url = "data:image/jpeg;base64," + base64.b64encode(buf.read()).decode()
+            except Exception as e:
+                app.logger.error(f"Cloudinary error (sin foto): {str(e)[:100]}")
+                return jsonify({"error": f"Cloudinary timeout: {str(e)[:50]}", "ok": False}), 500
             if return_json:
                 return jsonify({"imagen_url": imagen_url, "ok": True})
             buf.seek(0)
@@ -530,14 +534,12 @@ def generar():
         try:
             result = cloudinary.uploader.upload(
                 buf, public_id=f"lared/noticia_{titulo_hash}",
-                overwrite=True, resource_type="image", timeout=20
+                overwrite=True, resource_type="image", timeout=30
             )
-            imagen_url = result["secure_url"]
-        except Exception:
-            # Fallback: base64 si Cloudinary falla
-            buf.seek(0)
-            imagen_url = "data:image/jpeg;base64," + base64.b64encode(buf.read()).decode()
-        return jsonify({"imagen_url": imagen_url, "ok": True})
+            return jsonify({"imagen_url": result["secure_url"], "ok": True})
+        except Exception as e:
+            app.logger.error(f"Cloudinary error (POST): {str(e)[:100]}")
+            return jsonify({"error": f"Cloudinary timeout: {str(e)[:50]}", "ok": False}), 500
 
     try:
         imagen_bytes, imagen_url = generar_imagen(foto_bytes, titulo)
