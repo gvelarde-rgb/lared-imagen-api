@@ -278,23 +278,8 @@ def generar_imagen_sin_foto(titulo):
 
     RED_FILL = (220, 30, 30, 255)
 
-    # --- Logo centrado en el tercio superior ---
-    logo = get_logo().copy()
-    LOGO_W = 380
-    ratio = LOGO_W / logo.width
-    logo_r = logo.resize((LOGO_W, int(logo.height * ratio)), Image.LANCZOS)
-    lx = (W - logo_r.width) // 2
-    ly = 120
-    canvas.paste(logo_r, (lx, ly), logo_r)
-
-    logo_bottom = ly + logo_r.height + 60  # margen debajo del logo
-
-    # --- Área de texto: desde logo_bottom hasta casi abajo ---
-    text_area_y1 = logo_bottom
-    text_area_y2 = H - 120
-    text_max_w = W - 160  # 80px margen cada lado
-
-    # Calcular fuente más grande que quepa
+    # --- Pre-calcular tamaño del texto para centrar todo el bloque verticalmente ---
+    text_max_w = W - 160
     font_size = 80
     font = None
     lines = []
@@ -304,16 +289,15 @@ def generar_imagen_sin_foto(titulo):
         except OSError:
             f = ImageFont.load_default()
         ls = wrap_text_pixels(draw, titulo, f, text_max_w)
-        bbox = draw.textbbox((0, 0), "A", font=f)
-        lh = bbox[3] - bbox[1]
+        bbox_a = draw.textbbox((0, 0), "A", font=f)
+        lh = bbox_a[3] - bbox_a[1]
         spacing = int(lh * 0.22)
         total_h = len(ls) * lh + max(0, len(ls) - 1) * spacing
-        if total_h <= (text_area_y2 - text_area_y1):
+        if total_h <= H * 0.55:   # texto no ocupa más del 55% de la imagen
             font = f
             lines = ls
             break
         font_size -= 4
-
     if font is None:
         try:
             font = ImageFont.truetype(FONT_PATH, 36)
@@ -321,14 +305,30 @@ def generar_imagen_sin_foto(titulo):
             font = ImageFont.load_default()
         lines = wrap_text_pixels(draw, titulo, font, text_max_w)
 
-    # Medir altura real del bloque de texto
     bbox0 = draw.textbbox((0, 0), "A", font=font)
     lh_real = bbox0[3] - bbox0[1]
     spacing = int(lh_real * 0.22)
-    total_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
+    total_text_h = len(lines) * lh_real + max(0, len(lines) - 1) * spacing
 
-    # Centrar verticalmente en el área disponible
-    text_y = text_area_y1 + (text_area_y2 - text_area_y1 - total_h) // 2
+    # --- Logo ---
+    logo = get_logo().copy()
+    LOGO_W = 340
+    ratio = LOGO_W / logo.width
+    logo_r = logo.resize((LOGO_W, int(logo.height * ratio)), Image.LANCZOS)
+
+    GAP = 70  # espacio entre logo y texto
+    block_h = logo_r.height + GAP + total_text_h
+    block_y = (H - block_h) // 2   # bloque logo+texto centrado en la imagen
+
+    lx = (W - logo_r.width) // 2
+    ly = block_y
+    canvas.paste(logo_r, (lx, ly), logo_r)
+
+    text_area_y1 = ly + logo_r.height + GAP
+    text_max_w = W - 160  # 80px margen cada lado
+
+    # Posición Y del texto (justo debajo del logo con el GAP)
+    text_y = text_area_y1
 
     # Corchetes rojos alrededor del texto
     pad = 30
