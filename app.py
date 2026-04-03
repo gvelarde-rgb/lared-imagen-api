@@ -96,7 +96,7 @@ def avif_to_jpeg_bytes(raw_bytes):
 
 def descargar_imagen_url(url):
     """Descarga una imagen desde una URL usando headers de navegador"""
-    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=15, allow_redirects=True)
+    resp = requests.get(url, headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
     resp.raise_for_status()
 
     content_type = resp.headers.get("Content-Type", "")
@@ -264,7 +264,7 @@ def generar_imagen(foto_bytes, titulo):
             public_id=public_id,
             overwrite=True,
             resource_type="image",
-            timeout=30  # 30s máximo (deja margen antes de timeout 40s de Make)
+            timeout=35  # 35s máximo (deja margen antes de timeout 40s de Make)
         )
         return imagen_bytes, result["secure_url"]
     except Exception as e:
@@ -383,12 +383,16 @@ def get_foto_bytes(foto_url):
     if not foto_url:
         return None
     
-    # Intentar descarga directa primero (más rápido)
-    try:
-        foto_bytes = descargar_imagen_url(foto_url)
-        return foto_bytes
-    except Exception as e1:
-        app.logger.warning(f"Descarga directa falló: {str(e1)[:50]}")
+    # Intentar descarga directa primero (más rápido) - 2 reintentos
+    for intento in range(2):
+        try:
+            foto_bytes = descargar_imagen_url(foto_url)
+            return foto_bytes
+        except Exception as e1:
+            app.logger.warning(f"Intento {intento+1} descarga directa falló: {str(e1)[:50]}")
+            if intento == 0:
+                continue  # Reintentar
+            break
     
     # Fallback: usar Cloudinary fetch (puede ser lento)
     try:
@@ -397,10 +401,10 @@ def get_foto_bytes(foto_url):
             public_id="lared/temp_foto",
             overwrite=True,
             resource_type="image",
-            timeout=15
+            timeout=20
         )
         cloudinary_url = result["secure_url"]
-        resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=15)
+        resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=20)
         resp.raise_for_status()
         return resp.content
     except Exception as e2:
@@ -459,7 +463,7 @@ def generar():
             try:
                 result = cloudinary.uploader.upload(
                     buf, public_id=f"lared/noticia_{titulo_hash}",
-                    overwrite=True, resource_type="image", timeout=30
+                    overwrite=True, resource_type="image", timeout=35
                 )
                 imagen_url = result["secure_url"]
             except Exception as e:
@@ -534,7 +538,7 @@ def generar():
         try:
             result = cloudinary.uploader.upload(
                 buf, public_id=f"lared/noticia_{titulo_hash}",
-                overwrite=True, resource_type="image", timeout=30
+                overwrite=True, resource_type="image", timeout=35
             )
             return jsonify({"imagen_url": result["secure_url"], "ok": True})
         except Exception as e:
