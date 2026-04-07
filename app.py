@@ -16,6 +16,7 @@ import cloudinary.uploader
 import os
 import hashlib
 import base64
+import threading
 
 app = Flask(__name__)
 
@@ -254,22 +255,25 @@ def generar_imagen(foto_bytes, titulo):
     buffer.seek(0)
     imagen_bytes = buffer.getvalue()
 
-    # Subir a Cloudinary para respaldo y URL permanente
+    # Subir a Cloudinary en background (no bloquea la respuesta a Make)
+    def upload_cloudinary(img_bytes, pub_id):
+        try:
+            cloudinary.uploader.upload(
+                io.BytesIO(img_bytes),
+                public_id=pub_id,
+                overwrite=True,
+                resource_type="image",
+                timeout=60
+            )
+        except Exception as e:
+            app.logger.error(f"Cloudinary background upload failed: {str(e)[:100]}")
+
     titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
     public_id = f"lared/noticia_{titulo_hash}"
-    buffer.seek(0)
-    try:
-        result = cloudinary.uploader.upload(
-            buffer,
-            public_id=public_id,
-            overwrite=True,
-            resource_type="image",
-            timeout=35  # 35s máximo (deja margen antes de timeout 40s de Make)
-        )
-        return imagen_bytes, result["secure_url"]
-    except Exception as e:
-        app.logger.error(f"Cloudinary upload failed: {str(e)[:100]}")
-        raise ValueError(f"Cloudinary timeout/error: {str(e)[:50]}") from e
+    t = threading.Thread(target=upload_cloudinary, args=(imagen_bytes, public_id), daemon=True)
+    t.start()
+
+    return imagen_bytes
 
 
 def generar_imagen_sin_foto(titulo):
@@ -413,7 +417,7 @@ def get_foto_bytes(foto_url):
 
 
 def generar_imagen_bytes(foto_bytes, titulo):
-    """Alias de generar_imagen que devuelve (bytes, url)"""
+    """Alias de generar_imagen que devuelve bytes"""
     return generar_imagen(foto_bytes, titulo)
 
 
@@ -453,42 +457,40 @@ def generar():
 
         foto_bytes = get_foto_bytes(foto_url)
 
-        # Si no hay foto (URL vacía o falló la descarga), generar imagen solo-texto
+        # Si no hay foto, generar imagen solo-texto
         if not foto_bytes:
             img_sin_foto = generar_imagen_sin_foto(titulo)
             buf = io.BytesIO()
             img_sin_foto.save(buf, "JPEG", quality=92)
-            buf.seek(0)
+            imagen_bytes = buf.getvalue()
+        else:
+            try:
+                imagen_bytes = generar_imagen_bytes(foto_bytes, titulo)
+            except ValueError as e:
+                return jsonify({"error": str(e), "ok": False}), 400
+            except Exception as e:
+                return jsonify({"error": str(e), "ok": False}), 500
+
+        # Devolver imagen binaria inmediatamente (Cloudinary ya subió en background)
+        if return_json:
+            # Solo para debug: esperar Cloudinary y devolver URL
             titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
             try:
-                result = cloudinary.uploader.upload(
-                    buf, public_id=f"lared/noticia_{titulo_hash}",
+                r = cloudinary.uploader.upload(
+                    io.BytesIO(imagen_bytes),
+                    public_id=f"lared/noticia_{titulo_hash}",
                     overwrite=True, resource_type="image", timeout=35
                 )
-                imagen_url = result["secure_url"]
+                return jsonify({"imagen_url": r["secure_url"], "ok": True})
             except Exception as e:
-                app.logger.error(f"Cloudinary error (sin foto): {str(e)[:100]}")
-                return jsonify({"error": f"Cloudinary timeout: {str(e)[:50]}", "ok": False}), 500
-            if return_json:
-                return jsonify({"imagen_url": imagen_url, "ok": True})
-            buf.seek(0)
-            return send_file(io.BytesIO(buf.getvalue()), mimetype='image/jpeg',
-                             as_attachment=False, download_name='lared_noticia.jpg')
+                return jsonify({"error": str(e), "ok": False}), 500
 
-        try:
-            imagen_bytes, imagen_url = generar_imagen_bytes(foto_bytes, titulo)
-            if return_json:
-                return jsonify({"imagen_url": imagen_url, "ok": True})
-            return send_file(
-                io.BytesIO(imagen_bytes),
-                mimetype='image/jpeg',
-                as_attachment=False,
-                download_name='lared_noticia.jpg'
-            )
-        except ValueError as e:
-            return jsonify({"error": str(e), "ok": False}), 400
-        except Exception as e:
-            return jsonify({"error": str(e), "ok": False}), 500
+        return send_file(
+            io.BytesIO(imagen_bytes),
+            mimetype='image/jpeg',
+            as_attachment=False,
+            download_name='lared_noticia.jpg'
+        )
 
     content_type = request.content_type or ""
 
@@ -528,27 +530,29 @@ def generar():
     if not titulo:
         return jsonify({"error": "Se requiere el campo 'titulo'"}), 400
 
-    # Si no hay foto, generar imagen solo-texto (fondo blanco, texto centrado)
+    # Si no hay foto, generar imagen solo-texto
     if not foto_bytes:
         img_sin_foto = generar_imagen_sin_foto(titulo)
         buf = io.BytesIO()
         img_sin_foto.save(buf, "JPEG", quality=92)
-        buf.seek(0)
-        titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
+        imagen_bytes = buf.getvalue()
+    else:
         try:
-            result = cloudinary.uploader.upload(
-                buf, public_id=f"lared/noticia_{titulo_hash}",
-                overwrite=True, resource_type="image", timeout=35
-            )
-            return jsonify({"imagen_url": result["secure_url"], "ok": True})
+            imagen_bytes = generar_imagen(foto_bytes, titulo)
         except Exception as e:
-            app.logger.error(f"Cloudinary error (POST): {str(e)[:100]}")
-            return jsonify({"error": f"Cloudinary timeout: {str(e)[:50]}", "ok": False}), 500
+            return jsonify({"error": str(e), "ok": False}), 500
 
+    # POST devuelve JSON con URL de Cloudinary (no lo usa Make directamente)
+    titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
     try:
-        imagen_bytes, imagen_url = generar_imagen(foto_bytes, titulo)
-        return jsonify({"imagen_url": imagen_url, "ok": True})
+        result = cloudinary.uploader.upload(
+            io.BytesIO(imagen_bytes),
+            public_id=f"lared/noticia_{titulo_hash}",
+            overwrite=True, resource_type="image", timeout=35
+        )
+        return jsonify({"imagen_url": result["secure_url"], "ok": True})
     except Exception as e:
+        app.logger.error(f"Cloudinary error (POST): {str(e)[:100]}")
         return jsonify({"error": str(e), "ok": False}), 500
 
 
