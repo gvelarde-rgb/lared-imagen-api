@@ -516,9 +516,10 @@ def generar():
     else:
         # JSON (por defecto)
         data = request.get_json(force=True) or {}
-        titulo = data.get("titulo", "").strip()
-        foto_url = data.get("foto_url", "").strip()
-        foto_b64 = data.get("foto_base64", "").strip()
+        titulo = (data.get("titulo") or "").strip()
+        # FIX 2: foto_url puede llegar como null/None desde Make — no llamar .strip() sobre None
+        foto_url = (data.get("foto_url") or "").strip()
+        foto_b64 = (data.get("foto_base64") or "").strip()
 
         if foto_url:
             foto_bytes = get_foto_bytes(foto_url)
@@ -542,18 +543,35 @@ def generar():
         except Exception as e:
             return jsonify({"error": str(e), "ok": False}), 500
 
-    # POST devuelve JSON con URL de Cloudinary (no lo usa Make directamente)
+    # FIX 1: POST devuelve imagen binaria directamente (igual que GET)
+    # Cloudinary sube en background thread — no bloquea la respuesta a Make
     titulo_hash = hashlib.md5(titulo.encode()).hexdigest()[:12]
-    try:
-        result = cloudinary.uploader.upload(
-            io.BytesIO(imagen_bytes),
-            public_id=f"lared/noticia_{titulo_hash}",
-            overwrite=True, resource_type="image", timeout=35
-        )
-        return jsonify({"imagen_url": result["secure_url"], "ok": True})
-    except Exception as e:
-        app.logger.error(f"Cloudinary error (POST): {str(e)[:100]}")
-        return jsonify({"error": str(e), "ok": False}), 500
+
+    def _upload_bg(img_bytes, pub_id):
+        try:
+            cloudinary.uploader.upload(
+                io.BytesIO(img_bytes),
+                public_id=pub_id,
+                overwrite=True,
+                resource_type="image",
+                timeout=60
+            )
+        except Exception as e:
+            app.logger.error(f"Cloudinary bg upload (POST) failed: {str(e)[:100]}")
+
+    t = threading.Thread(
+        target=_upload_bg,
+        args=(imagen_bytes, f"lared/noticia_{titulo_hash}"),
+        daemon=True
+    )
+    t.start()
+
+    return send_file(
+        io.BytesIO(imagen_bytes),
+        mimetype='image/jpeg',
+        as_attachment=False,
+        download_name='lared_noticia.jpg'
+    )
 
 
 if __name__ == "__main__":
