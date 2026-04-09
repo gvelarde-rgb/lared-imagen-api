@@ -96,8 +96,16 @@ def avif_to_jpeg_bytes(raw_bytes):
 
 
 def descargar_imagen_url(url):
-    """Descarga una imagen desde una URL usando headers de navegador"""
+    """Descarga una imagen desde una URL usando headers de navegador.
+    Falla rápido si el servidor responde con captcha/challenge (202 + sg-captcha).
+    """
     resp = requests.get(url, headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
+
+    # Detección temprana de captcha/anti-bot (ej: Sucuri SG Captcha en cms.lared1061.com)
+    # Esos endpoints responden 202 con header sg-captcha y nunca entregan la imagen real.
+    if resp.status_code == 202 or "sg-captcha" in resp.headers:
+        raise ValueError(f"Captcha/anti-bot detectado en {url} (HTTP {resp.status_code})")
+
     resp.raise_for_status()
 
     content_type = resp.headers.get("Content-Type", "")
@@ -381,38 +389,30 @@ def generar_imagen_sin_foto(titulo):
 
 def get_foto_bytes(foto_url):
     """
-    Descarga foto_url con reintentos y fallback robusto.
-    Si está vacío o falla, devuelve None (el llamador usa fondo blanco).
+    Descarga foto_url con fallback robusto.
+    - Si está vacío → None (imagen sin foto)
+    - Si hay captcha/anti-bot → falla rápido, sin reintentos, devuelve None
+    - Si falla por otro motivo → 1 reintento, luego None
     """
     if not foto_url:
         return None
-    
-    # Intentar descarga directa primero (más rápido) - 2 reintentos
-    for intento in range(2):
-        try:
-            foto_bytes = descargar_imagen_url(foto_url)
-            return foto_bytes
-        except Exception as e1:
-            app.logger.warning(f"Intento {intento+1} descarga directa falló: {str(e1)[:50]}")
-            if intento == 0:
-                continue  # Reintentar
-            break
-    
-    # Fallback: usar Cloudinary fetch (puede ser lento)
+
+    # Intento 1: descarga directa
     try:
-        result = cloudinary.uploader.upload(
-            foto_url,
-            public_id="lared/temp_foto",
-            overwrite=True,
-            resource_type="image",
-            timeout=20
-        )
-        cloudinary_url = result["secure_url"]
-        resp = requests.get(cloudinary_url, headers=BROWSER_HEADERS, timeout=20)
-        resp.raise_for_status()
-        return resp.content
+        return descargar_imagen_url(foto_url)
+    except ValueError as e:
+        # ValueError incluye captcha, content-type incorrecto, imagen vacía
+        # No tiene sentido reintentar — falla rápido
+        app.logger.warning(f"Foto no disponible (falla rápida): {str(e)[:80]}")
+        return None
+    except Exception as e1:
+        app.logger.warning(f"Descarga directa falló: {str(e1)[:60]}")
+
+    # Intento 2: un reintento para errores de red transitorios
+    try:
+        return descargar_imagen_url(foto_url)
     except Exception as e2:
-        app.logger.warning(f"Cloudinary fetch falló: {str(e2)[:50]}")
+        app.logger.warning(f"Reintento también falló: {str(e2)[:60]}")
         return None
 
 
