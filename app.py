@@ -597,6 +597,36 @@ def generar():
     )
 
 
+@app.route("/debug-foto", methods=["GET"])
+def debug_foto():
+    """Endpoint temporal de diagnóstico — ver qué pasa con una URL de foto."""
+    url = request.args.get("url", "")
+    if not url:
+        return jsonify({"error": "falta parametro url"}), 400
+    results = {"url": url}
+    # Test 1: probe sin redirects
+    try:
+        probe = requests.get(url, headers=BROWSER_HEADERS, timeout=8, allow_redirects=False)
+        results["probe_status"] = probe.status_code
+        results["probe_captcha"] = "sg-captcha" in probe.headers
+        results["probe_ct"] = probe.headers.get("Content-Type", "")
+    except Exception as e:
+        results["probe_error"] = str(e)[:100]
+    # Test 2: cloudinary upload directo
+    try:
+        r = cloudinary.uploader.upload(
+            url, public_id="lared/debug_test", overwrite=True,
+            resource_type="image", timeout=20
+        )
+        results["cloudinary_ok"] = True
+        results["cloudinary_url"] = r["secure_url"]
+        results["size_w"] = r.get("width")
+        results["size_h"] = r.get("height")
+    except Exception as e:
+        results["cloudinary_error"] = str(e)[:200]
+    return jsonify(results)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
