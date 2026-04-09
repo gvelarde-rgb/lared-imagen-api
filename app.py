@@ -396,26 +396,42 @@ def generar_imagen_sin_foto(titulo):
 
 def get_foto_bytes(foto_url):
     """
-    Descarga foto_url con fallback robusto.
-    - Si está vacío → None (imagen sin foto)
-    - Si hay captcha/anti-bot → falla rápido, sin reintentos, devuelve None
-    - Si falla por otro motivo → 1 reintento, luego None
+    Descarga foto_url con fallback via Cloudinary.
+    - Vacío → None
+    - Descarga directa OK → bytes
+    - Captcha/anti-bot (cms.lared1061.com) → Cloudinary fetch como proxy → bytes
+    - Todo falla → None (imagen sin foto)
     """
     if not foto_url:
         return None
 
-    # Intento 1: descarga directa
+    # Intento 1: descarga directa (probe sin redirects para detectar captcha rápido)
     try:
         return descargar_imagen_url(foto_url)
     except ValueError as e:
-        # ValueError incluye captcha, content-type incorrecto, imagen vacía
-        # No tiene sentido reintentar — falla rápido
-        app.logger.warning(f"Foto no disponible (falla rápida): {str(e)[:80]}")
-        return None
+        # Captcha, content-type incorrecto, imagen vacía — no reintentar directo
+        app.logger.warning(f"Descarga directa bloqueada: {str(e)[:80]}")
+        # Fallback: Cloudinary como proxy (sus IPs no están bloqueadas por Sucuri)
+        try:
+            result = cloudinary.uploader.upload(
+                foto_url,
+                public_id="lared/proxy_foto",
+                overwrite=True,
+                resource_type="image",
+                timeout=20
+            )
+            resp = requests.get(result["secure_url"],
+                                headers=BROWSER_HEADERS, timeout=15)
+            resp.raise_for_status()
+            app.logger.info(f"Foto obtenida via Cloudinary proxy ({len(resp.content)} bytes)")
+            return resp.content
+        except Exception as e2:
+            app.logger.warning(f"Cloudinary proxy también falló: {str(e2)[:80]}")
+            return None
     except Exception as e1:
-        app.logger.warning(f"Descarga directa falló: {str(e1)[:60]}")
+        app.logger.warning(f"Descarga directa falló (red): {str(e1)[:60]}")
 
-    # Intento 2: un reintento para errores de red transitorios
+    # Intento 2: reintento simple para errores de red transitorios
     try:
         return descargar_imagen_url(foto_url)
     except Exception as e2:
