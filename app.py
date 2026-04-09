@@ -98,14 +98,21 @@ def avif_to_jpeg_bytes(raw_bytes):
 def descargar_imagen_url(url):
     """Descarga una imagen desde una URL usando headers de navegador.
     Falla rápido si el servidor responde con captcha/challenge (202 + sg-captcha).
+
+    IMPORTANTE: allow_redirects=False en el primer request para poder detectar
+    el 202 de Sucuri SG Captcha antes de que requests siga la meta-refresh y
+    quede bloqueado indefinidamente en /.well-known/sgcaptcha/.
     """
+    # Paso 1: request sin seguir redirects — detectar captcha/anti-bot al instante
+    probe = requests.get(url, headers=BROWSER_HEADERS, timeout=8,
+                         allow_redirects=False)
+
+    # Sucuri SG Captcha: HTTP 202 + header sg-captcha (cms.lared1061.com)
+    if probe.status_code == 202 or "sg-captcha" in probe.headers:
+        raise ValueError(f"Captcha/anti-bot detectado en {url} (HTTP {probe.status_code})")
+
+    # Paso 2: si pasó el probe (3xx redirect legítimo o 200 parcial), hacer GET completo
     resp = requests.get(url, headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
-
-    # Detección temprana de captcha/anti-bot (ej: Sucuri SG Captcha en cms.lared1061.com)
-    # Esos endpoints responden 202 con header sg-captcha y nunca entregan la imagen real.
-    if resp.status_code == 202 or "sg-captcha" in resp.headers:
-        raise ValueError(f"Captcha/anti-bot detectado en {url} (HTTP {resp.status_code})")
-
     resp.raise_for_status()
 
     content_type = resp.headers.get("Content-Type", "")
