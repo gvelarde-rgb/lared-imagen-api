@@ -405,37 +405,30 @@ def get_foto_bytes(foto_url):
     if not foto_url:
         return None
 
-    # Intento 1: descarga directa (probe sin redirects para detectar captcha rápido)
+    # Intento 1: descarga directa
     try:
         return descargar_imagen_url(foto_url)
-    except ValueError as e:
-        # Captcha, content-type incorrecto, imagen vacía — no reintentar directo
-        app.logger.warning(f"Descarga directa bloqueada: {str(e)[:80]}")
-        # Fallback: Cloudinary como proxy (sus IPs no están bloqueadas por Sucuri)
-        try:
-            result = cloudinary.uploader.upload(
-                foto_url,
-                public_id="lared/proxy_foto",
-                overwrite=True,
-                resource_type="image",
-                timeout=20
-            )
-            resp = requests.get(result["secure_url"],
-                                headers=BROWSER_HEADERS, timeout=15)
-            resp.raise_for_status()
-            app.logger.info(f"Foto obtenida via Cloudinary proxy ({len(resp.content)} bytes)")
-            return resp.content
-        except Exception as e2:
-            app.logger.warning(f"Cloudinary proxy también falló: {str(e2)[:80]}")
-            return None
     except Exception as e1:
-        app.logger.warning(f"Descarga directa falló (red): {str(e1)[:60]}")
+        app.logger.warning(f"Descarga directa falló: {str(e1)[:80]}")
 
-    # Intento 2: reintento simple para errores de red transitorios
+    # Fallback: Cloudinary como proxy
+    # Sus IPs no están bloqueadas por Sucuri SG Captcha de cms.lared1061.com
+    # También cubre: Max retries, captcha, connection refused, etc.
     try:
-        return descargar_imagen_url(foto_url)
+        result = cloudinary.uploader.upload(
+            foto_url,
+            public_id="lared/proxy_foto",
+            overwrite=True,
+            resource_type="image",
+            timeout=20
+        )
+        resp = requests.get(result["secure_url"],
+                            headers=BROWSER_HEADERS, timeout=15)
+        resp.raise_for_status()
+        app.logger.info(f"Foto via Cloudinary proxy OK ({len(resp.content)} bytes)")
+        return resp.content
     except Exception as e2:
-        app.logger.warning(f"Reintento también falló: {str(e2)[:60]}")
+        app.logger.warning(f"Cloudinary proxy falló: {str(e2)[:80]}")
         return None
 
 
