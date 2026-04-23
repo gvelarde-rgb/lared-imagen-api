@@ -482,10 +482,12 @@ def generar():
         else:
             try:
                 imagen_bytes = generar_imagen_bytes(foto_bytes, titulo)
-            except ValueError as e:
-                return jsonify({"error": str(e), "ok": False}), 400
-            except Exception as e:
-                return jsonify({"error": str(e), "ok": False}), 500
+            except Exception:
+                # Fallback: siempre devolver imagen con diseño aunque falle la foto
+                img_sin_foto = generar_imagen_sin_foto(titulo)
+                buf = io.BytesIO()
+                img_sin_foto.save(buf, "JPEG", quality=92)
+                imagen_bytes = buf.getvalue()
 
         # Devolver imagen binaria inmediatamente (Cloudinary ya subió en background)
         if return_json:
@@ -556,8 +558,12 @@ def generar():
     else:
         try:
             imagen_bytes = generar_imagen(foto_bytes, titulo)
-        except Exception as e:
-            return jsonify({"error": str(e), "ok": False}), 500
+        except Exception:
+            # Fallback: siempre devolver imagen con diseño aunque falle la foto
+            img_sin_foto = generar_imagen_sin_foto(titulo)
+            buf = io.BytesIO()
+            img_sin_foto.save(buf, "JPEG", quality=92)
+            imagen_bytes = buf.getvalue()
 
     # FIX 1: POST devuelve imagen binaria directamente (igual que GET)
     # Cloudinary sube en background thread — no bloquea la respuesta a Make
