@@ -7,7 +7,7 @@ Body (application/json o form-data):
 Respuesta: { "imagen_url": "https://res.cloudinary.com/..." }
 """
 
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, Response
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import io
@@ -17,6 +17,9 @@ import os
 import hashlib
 import base64
 import threading
+import time
+from email.utils import formatdate
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -596,34 +599,126 @@ def generar():
     )
 
 
-@app.route("/debug-foto", methods=["GET"])
-def debug_foto():
-    """Endpoint temporal de diagnóstico — ver qué pasa con una URL de foto."""
-    url = request.args.get("url", "")
-    if not url:
-        return jsonify({"error": "falta parametro url"}), 400
-    results = {"url": url}
-    # Test 1: probe sin redirects
+# ---------------------------------------------------------------------------
+# Caché de media (foto) para evitar N llamadas a WP por artículo
+# { media_id: (foto_url, timestamp) }
+# ---------------------------------------------------------------------------
+_media_cache = {}
+_MEDIA_CACHE_TTL = 300  # 5 minutos
+
+# Mapa de IDs de categoría → nombre legible
+_CAT_NAMES = {
+    1:     "Sin Categoria",
+    4:     "Internacionales",
+    8:     "Nacionales",
+    6879:  "Economía",
+    34068: "Futbol Nacional",
+    36690: "Futbol Internacional",
+    36710: "Deporte nacional",
+    36775: "Deporte internacional",
+}
+
+WP_API = "https://cms.lared1061.com/wp-json/wp/v2"
+WP_TIMEOUT = 10
+
+
+def _get_media_url(media_id):
+    """Devuelve la URL de la imagen del post. Cachea 5 min."""
+    if not media_id:
+        return ""
+    now = time.time()
+    if media_id in _media_cache:
+        url, ts = _media_cache[media_id]
+        if now - ts < _MEDIA_CACHE_TTL:
+            return url
     try:
-        probe = requests.get(url, headers=BROWSER_HEADERS, timeout=8, allow_redirects=False)
-        results["probe_status"] = probe.status_code
-        results["probe_captcha"] = "sg-captcha" in probe.headers
-        results["probe_ct"] = probe.headers.get("Content-Type", "")
-    except Exception as e:
-        results["probe_error"] = str(e)[:100]
-    # Test 2: cloudinary upload directo
-    try:
-        r = cloudinary.uploader.upload(
-            url, public_id="lared/debug_test", overwrite=True,
-            resource_type="image", timeout=20
+        r = requests.get(
+            f"{WP_API}/media/{media_id}",
+            params={"_fields": "source_url"},
+            timeout=WP_TIMEOUT
         )
-        results["cloudinary_ok"] = True
-        results["cloudinary_url"] = r["secure_url"]
-        results["size_w"] = r.get("width")
-        results["size_h"] = r.get("height")
+        url = r.json().get("source_url", "") if r.ok else ""
+    except Exception:
+        url = ""
+    _media_cache[media_id] = (url, now)
+    return url
+
+
+def _wp_date_to_rfc2822(date_str):
+    """Convierte '2026-05-04T14:30:00' → RFC 2822 para RSS."""
+    try:
+        dt = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+        return formatdate(dt.timestamp(), usegmt=True)
+    except Exception:
+        return formatdate(usegmt=True)
+
+
+def _escape_xml(text):
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+@app.route("/rss-proxy", methods=["GET"])
+def rss_proxy():
+    """
+    RSS generado desde la REST API de WordPress directa (cms.lared1061.com).
+    Evita la dependencia del RSS de Next.js/Vercel que genera 500s intermitentes.
+    Make apunta aquí en lugar de www.lared1061.com/feed
+    """
+    try:
+        resp = requests.get(
+            f"{WP_API}/posts",
+            params={
+                "per_page": 20,
+                "_fields": "id,title,date,link,categories,featured_media",
+                "status": "publish",
+            },
+            timeout=WP_TIMEOUT
+        )
+        if not resp.ok:
+            return Response("Error consultando WordPress", status=502, mimetype="text/plain")
+        posts = resp.json()
     except Exception as e:
-        results["cloudinary_error"] = str(e)[:200]
-    return jsonify(results)
+        return Response(f"Error: {e}", status=503, mimetype="text/plain")
+
+    items = []
+    for p in posts:
+        title = _escape_xml(p.get("title", {}).get("rendered", ""))
+        raw_link = p.get("link", "")
+        # Convertir cms.lared1061.com/slug/ → www.lared1061.com/posts/slug
+        slug = raw_link.rstrip("/").split("/")[-1]
+        pub_link = f"https://www.lared1061.com/posts/{slug}"
+        pub_date = _wp_date_to_rfc2822(p.get("date", ""))
+        cat_ids = p.get("categories", [])
+        cat_names = [_CAT_NAMES.get(cid, str(cid)) for cid in cat_ids]
+        categories_xml = "".join(f"<category>{_escape_xml(c)}</category>" for c in cat_names)
+        media_id = p.get("featured_media") or 0
+        foto_url = _get_media_url(media_id) if media_id else ""
+        media_xml = (
+            f'<media:content url="{_escape_xml(foto_url)}" type="image/jpeg" medium="image" />'
+            if foto_url else ""
+        )
+        items.append(f"""    <item>
+      <title>{title}</title>
+      <link>{_escape_xml(pub_link)}</link>
+      <guid isPermaLink="true">{_escape_xml(pub_link)}</guid>
+      <pubDate>{pub_date}</pubDate>
+      {categories_xml}
+      {media_xml}
+    </item>""")
+
+    feed = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>La Red 106.1 - Noticias</title>
+    <link>https://www.lared1061.com</link>
+    <description>Noticias de Guatemala y el Mundo</description>
+    <language>es-GT</language>
+    <lastBuildDate>{formatdate(usegmt=True)}</lastBuildDate>
+{"".join(items)}
+  </channel>
+</rss>"""
+
+    return Response(feed, mimetype="application/rss+xml")
 
 
 if __name__ == "__main__":
