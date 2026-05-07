@@ -665,53 +665,36 @@ def _escape_xml(text):
     return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-@app.route("/rss-proxy", methods=["GET"])
-def rss_proxy():
-    """
-    RSS generado desde la REST API de WordPress directa (cms.lared1061.com).
-    Evita la dependencia del RSS de Next.js/Vercel que genera 500s intermitentes.
-    Make apunta aquí en lugar de www.lared1061.com/feed
-    """
-    try:
-        resp = requests.get(
-            f"{WP_API}/posts",
-            params={
-                "per_page": 20,
-                "_fields": "id,title,date,link,categories,featured_media",
-                "status": "publish",
-            },
-            headers=WP_HEADERS,
-            timeout=WP_TIMEOUT
-        )
-        if not resp.ok:
-            app.logger.error(f"WP REST API error: {resp.status_code} | body: {resp.text[:200]}")
-            return Response(f"WordPress error {resp.status_code}", status=502, mimetype="text/plain")
-        try:
-            posts = resp.json()
-        except Exception as je:
-            app.logger.error(f"WP JSON parse error: {je} | body: {resp.text[:300]}")
-            return Response("WordPress devolvio respuesta invalida", status=502, mimetype="text/plain")
-    except Exception as e:
-        app.logger.error(f"WP request exception: {type(e).__name__}: {e}")
-        return Response(f"Error conectando a WordPress: {type(e).__name__}", status=503, mimetype="text/plain")
+# Cache global del último feed exitoso (sobrevive cold starts en memoria)
+_feed_cache = {"xml": None, "ts": 0}
+_FEED_CACHE_TTL = 3600  # 1 hora máximo
 
+VERCEL_RSS = "https://www.lared1061.com/feed"
+VERCEL_TIMEOUT = 12
+
+
+def _build_feed_from_wp():
+    """Construye RSS desde WP REST API directa. Último recurso."""
+    r = requests.get(
+        f"{WP_API}/posts",
+        params={"per_page": 20, "_fields": "id,title,date,link,categories,featured_media", "status": "publish"},
+        headers=WP_HEADERS,
+        timeout=WP_TIMEOUT
+    )
+    if not r.ok:
+        raise ValueError(f"WP REST API {r.status_code}")
+    posts = r.json()
     items = []
     for p in posts:
         title = _escape_xml(p.get("title", {}).get("rendered", ""))
-        raw_link = p.get("link", "")
-        # Convertir cms.lared1061.com/slug/ → www.lared1061.com/posts/slug
-        slug = raw_link.rstrip("/").split("/")[-1]
+        slug = p.get("link", "").rstrip("/").split("/")[-1]
         pub_link = f"https://www.lared1061.com/posts/{slug}"
         pub_date = _wp_date_to_rfc2822(p.get("date", ""))
-        cat_ids = p.get("categories", [])
-        cat_names = [_CAT_NAMES.get(cid, str(cid)) for cid in cat_ids]
+        cat_names = [_CAT_NAMES.get(cid, str(cid)) for cid in p.get("categories", [])]
         categories_xml = "".join(f"<category>{_escape_xml(c)}</category>" for c in cat_names)
         media_id = p.get("featured_media") or 0
         foto_url = _get_media_url(media_id) if media_id else ""
-        media_xml = (
-            f'<media:content url="{_escape_xml(foto_url)}" type="image/jpeg" medium="image" />'
-            if foto_url else ""
-        )
+        media_xml = (f'<media:content url="{_escape_xml(foto_url)}" type="image/jpeg" medium="image" />' if foto_url else "")
         items.append(f"""    <item>
       <title>{title}</title>
       <link>{_escape_xml(pub_link)}</link>
@@ -720,7 +703,6 @@ def rss_proxy():
       {categories_xml}
       {media_xml}
     </item>""")
-
     feed = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
   <channel>
@@ -732,8 +714,51 @@ def rss_proxy():
 {"".join(items)}
   </channel>
 </rss>"""
+    return feed.encode("utf-8")
 
-    return Response(feed, mimetype="application/rss+xml")
+
+@app.route("/rss-proxy", methods=["GET"])
+def rss_proxy():
+    """
+    RSS proxy con 3 capas de resiliencia:
+    1. RSS de Vercel (www.lared1061.com/feed) — fuente primaria
+    2. Cache en memoria del último feed exitoso — hasta 1 hora
+    3. WP REST API directa — último recurso
+    """
+    global _feed_cache
+    import xml.etree.ElementTree as ET
+
+    # --- Capa 1: RSS Vercel ---
+    try:
+        resp = requests.get(
+            VERCEL_RSS,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; RSSProxy/1.0)", "Accept": "application/rss+xml, application/xml"},
+            timeout=VERCEL_TIMEOUT
+        )
+        if resp.ok and len(resp.content) > 500:
+            ET.fromstring(resp.content)  # validar XML
+            _feed_cache["xml"] = resp.content
+            _feed_cache["ts"] = time.time()
+            return Response(resp.content, mimetype="application/rss+xml")
+    except Exception as e:
+        app.logger.warning(f"rss-proxy capa1 (Vercel) falló: {type(e).__name__}: {e}")
+
+    # --- Capa 2: Cache en memoria ---
+    if _feed_cache["xml"] and (time.time() - _feed_cache["ts"]) < _FEED_CACHE_TTL:
+        app.logger.info("rss-proxy: sirviendo desde cache")
+        return Response(_feed_cache["xml"], mimetype="application/rss+xml")
+
+    # --- Capa 3: WP REST API directa ---
+    try:
+        feed_xml = _build_feed_from_wp()
+        _feed_cache["xml"] = feed_xml
+        _feed_cache["ts"] = time.time()
+        app.logger.info("rss-proxy: sirviendo desde WP REST API")
+        return Response(feed_xml, mimetype="application/rss+xml")
+    except Exception as e:
+        app.logger.error(f"rss-proxy capa3 (WP REST API) falló: {e}")
+
+    return Response("Feed temporalmente no disponible", status=503, mimetype="text/plain")
 
 
 if __name__ == "__main__":
