@@ -619,7 +619,14 @@ _CAT_NAMES = {
 }
 
 WP_API = "https://cms.lared1061.com/wp-json/wp/v2"
-WP_TIMEOUT = 10
+WP_TIMEOUT = 12
+
+# Sucuri bloquea IPs de datacenter sin User-Agent de browser
+WP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
 
 
 def _get_media_url(media_id):
@@ -635,6 +642,7 @@ def _get_media_url(media_id):
         r = requests.get(
             f"{WP_API}/media/{media_id}",
             params={"_fields": "source_url"},
+            headers=WP_HEADERS,
             timeout=WP_TIMEOUT
         )
         url = r.json().get("source_url", "") if r.ok else ""
@@ -672,13 +680,20 @@ def rss_proxy():
                 "_fields": "id,title,date,link,categories,featured_media",
                 "status": "publish",
             },
+            headers=WP_HEADERS,
             timeout=WP_TIMEOUT
         )
         if not resp.ok:
-            return Response("Error consultando WordPress", status=502, mimetype="text/plain")
-        posts = resp.json()
+            app.logger.error(f"WP REST API error: {resp.status_code} | body: {resp.text[:200]}")
+            return Response(f"WordPress error {resp.status_code}", status=502, mimetype="text/plain")
+        try:
+            posts = resp.json()
+        except Exception as je:
+            app.logger.error(f"WP JSON parse error: {je} | body: {resp.text[:300]}")
+            return Response("WordPress devolvio respuesta invalida", status=502, mimetype="text/plain")
     except Exception as e:
-        return Response(f"Error: {e}", status=503, mimetype="text/plain")
+        app.logger.error(f"WP request exception: {type(e).__name__}: {e}")
+        return Response(f"Error conectando a WordPress: {type(e).__name__}", status=503, mimetype="text/plain")
 
     items = []
     for p in posts:
