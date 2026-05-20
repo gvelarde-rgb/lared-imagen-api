@@ -621,11 +621,17 @@ _CAT_NAMES = {
 WP_API = "https://cms.lared1061.com/wp-json/wp/v2"
 WP_TIMEOUT = 12
 
-# Sucuri bloquea IPs de datacenter sin User-Agent de browser
+# Sucuri bloquea IPs de datacenter — headers completos de browser para bypasear
 WP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-GT,es;q=0.9,en;q=0.8",
+    "Referer": "https://www.lared1061.com/",
+    "Origin": "https://www.lared1061.com",
+    "sec-fetch-site": "cross-site",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
 }
 
 
@@ -671,6 +677,95 @@ _FEED_CACHE_TTL = 3600  # 1 hora máximo
 
 VERCEL_RSS = "https://www.lared1061.com/feed"
 VERCEL_TIMEOUT = 12
+NEXTJS_URL = "https://www.lared1061.com"  # Capa 1.5: scraper del sitio Next.js
+
+
+def _build_feed_from_nextjs():
+    """
+    Capa 1.5: scraper del HTML de www.lared1061.com (Next.js App Router).
+    No usa __NEXT_DATA__ (no existe en App Router). Extrae posts via regex:
+      - <a href="/posts/SLUG"><h3>TITLE</h3> para slug+título
+      - <img alt="TITLE" srcSet="/_next/image?url=ENCODED_URL"> para imagen
+    Funciona desde cualquier IP — no pasa por Sucuri WP.
+    """
+    import re as _re
+    from urllib.parse import unquote as _unquote
+
+    r = requests.get(
+        NEXTJS_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-GT,es;q=0.9",
+        },
+        timeout=VERCEL_TIMEOUT
+    )
+    if not r.ok:
+        raise ValueError(f"Next.js home {r.status_code}")
+
+    html = r.text
+
+    # Mapa alt_text -> url_imagen desde srcSet de Next.js
+    # Formato: /_next/image?url=https%3A%2F%2Fcms...&w=32&q=75 (puede tener &amp; en HTML)
+    img_map = {}
+    for alt, srcset in _re.findall(r'<img[^>]+alt="([^"]+)"[^>]+srcSet="([^"]+)"', html):
+        m = _re.search(r'url=(https?(?:%3A|:)[^&"\s]+)', srcset)
+        if m:
+            img_map[alt] = _unquote(m.group(1))
+
+    # Extraer posts: <a href="/posts/SLUG"><h3...>TITLE</h3>
+    raw_posts = _re.findall(
+        r'<a[^>]+href="(/posts/([^"]+))"[^>]*>\s*<h3[^>]*>([^<]+)</h3>',
+        html
+    )
+
+    if not raw_posts:
+        raise ValueError("No se encontraron posts en el HTML de Next.js")
+
+    # Deduplicar por slug manteniendo orden
+    seen_slugs = set()
+    items = []
+    for path, slug, title_raw in raw_posts[:40]:
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        if len(items) >= 20:
+            break
+
+        title = _escape_xml(title_raw.strip())
+        pub_link = _escape_xml(f"https://www.lared1061.com{path}")
+        pub_date = formatdate(usegmt=True)
+
+        foto_url = img_map.get(title_raw.strip(), "")
+        media_xml = (
+            f'<media:content url="{_escape_xml(foto_url)}" type="image/jpeg" medium="image" />'
+            if foto_url else ""
+        )
+
+        items.append(f"""    <item>
+      <title>{title}</title>
+      <link>{pub_link}</link>
+      <guid isPermaLink="true">{pub_link}</guid>
+      <pubDate>{pub_date}</pubDate>
+      {media_xml}
+    </item>""")
+
+    if not items:
+        raise ValueError("Lista de items vacía tras parsear Next.js")
+
+    feed = f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>La Red 106.1 - Noticias</title>
+    <link>https://www.lared1061.com</link>
+    <description>Noticias de Guatemala y el Mundo</description>
+    <language>es-GT</language>
+    <lastBuildDate>{formatdate(usegmt=True)}</lastBuildDate>
+{"".join(items)}
+  </channel>
+</rss>"""
+    return feed.encode("utf-8")
 
 
 def _build_feed_from_wp():
@@ -742,6 +837,16 @@ def rss_proxy():
             return Response(resp.content, mimetype="application/rss+xml")
     except Exception as e:
         app.logger.warning(f"rss-proxy capa1 (Vercel) falló: {type(e).__name__}: {e}")
+
+    # --- Capa 1.5: Scraper Next.js (www.lared1061.com HTML) ---
+    try:
+        feed_xml = _build_feed_from_nextjs()
+        _feed_cache["xml"] = feed_xml
+        _feed_cache["ts"] = time.time()
+        app.logger.info("rss-proxy: sirviendo desde Next.js scraper")
+        return Response(feed_xml, mimetype="application/rss+xml")
+    except Exception as e:
+        app.logger.warning(f"rss-proxy capa1.5 (Next.js scraper) falló: {type(e).__name__}: {e}")
 
     # --- Capa 2: Cache en memoria ---
     if _feed_cache["xml"] and (time.time() - _feed_cache["ts"]) < _FEED_CACHE_TTL:
