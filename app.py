@@ -868,34 +868,3 @@ def rss_proxy():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
-@app.route("/debug-foto", methods=["GET"])
-def debug_foto():
-    import requests as req
-    foto_url = request.args.get("url", "").strip()
-    if not foto_url:
-        return jsonify({"error": "?url= requerido"}), 400
-    results = {}
-    # Test A: headers minimos
-    try:
-        h = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"}
-        r = req.get(foto_url, headers=h, timeout=15, allow_redirects=False)
-        results["A_minimal"] = {"status": r.status_code, "size": len(r.content), "ct": r.headers.get("Content-Type","")}
-    except Exception as e:
-        results["A_minimal"] = {"error": str(e)}
-    # Test B: sin headers
-    try:
-        r2 = req.get(foto_url, timeout=15, allow_redirects=False)
-        results["B_no_headers"] = {"status": r2.status_code, "size": len(r2.content), "ct": r2.headers.get("Content-Type","")}
-    except Exception as e:
-        results["B_no_headers"] = {"error": str(e)}
-    # Test C: get_foto_bytes real
-    try:
-        fb = get_foto_bytes(foto_url)
-        results["C_get_foto_bytes"] = {"success": fb is not None, "size": len(fb) if fb else 0}
-    except Exception as e:
-        results["C_get_foto_bytes"] = {"error": str(e)}
-    # Mostrar BROWSER_HEADERS actuales
-    results["current_BROWSER_HEADERS"] = BROWSER_HEADERS
-    return jsonify(results)
