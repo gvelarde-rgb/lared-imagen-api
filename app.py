@@ -68,9 +68,10 @@ def get_logo():
 # Headers de navegador para evitar bloqueos de captcha
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Accept": "image/*,*/*;q=0.8",
     "Accept-Language": "es-GT,es;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
+    # Accept-Encoding omitido: Sucuri/nginx en cms.lared1061.com devuelve 403
+    # cuando requests negocia brotli (br). Sin este header, pasa correctamente.
     "Referer": "https://lared1061.com/",
     "Connection": "keep-alive",
 }
