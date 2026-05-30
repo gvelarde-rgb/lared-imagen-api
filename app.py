@@ -23,6 +23,11 @@ from datetime import datetime, timezone
 
 app = Flask(__name__)
 
+# Registrar las rutas de MIA 93.7 y Globo 98.9 (prefijos /mia y /globo)
+# Consolidadas en este mismo servicio para usar un solo billing de Render.
+from mia_brands import mia_bp
+app.register_blueprint(mia_bp)
+
 # Configuración de Cloudinary desde variables de entorno
 cloudinary.config(
     cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME", "dd9cuovet"),
