@@ -444,7 +444,7 @@ def generar_imagen_bytes(foto_bytes, titulo):
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "servicio": "La Red - Generador de Imágenes"})
+    return jsonify({"status": "ok", "servicio": "La Red - Generador de Imágenes", "version": "4e6518a-identity"})
 
 
 @app.route("/generar-imagen", methods=["GET", "POST"])
