@@ -870,6 +870,49 @@ def rss_proxy():
     return Response("Feed temporalmente no disponible", status=503, mimetype="text/plain")
 
 
+
+@app.route("/debug-foto", methods=["GET"])
+def debug_foto():
+    """Endpoint de diagnóstico: muestra qué pasa al descargar foto_url"""
+    foto_url = request.args.get("foto_url", "").strip()
+    resultado = {"foto_url": foto_url, "pasos": []}
+
+    if not foto_url:
+        return jsonify({"error": "Se requiere foto_url"}), 400
+
+    # Paso 1: probe sin redirects
+    try:
+        import requests as req_mod
+        probe = req_mod.get(foto_url, headers=BROWSER_HEADERS, timeout=8, allow_redirects=False)
+        resultado["pasos"].append({
+            "paso": "probe",
+            "status": probe.status_code,
+            "headers_respuesta": dict(probe.headers),
+            "content_type": probe.headers.get("Content-Type",""),
+            "bytes": len(probe.content)
+        })
+        captcha = probe.status_code == 202 or "sg-captcha" in probe.headers
+        resultado["captcha_detectado"] = captcha
+    except Exception as e:
+        resultado["pasos"].append({"paso": "probe", "error": str(e)})
+        captcha = False
+
+    if not captcha:
+        # Paso 2: descarga completa
+        try:
+            resp = req_mod.get(foto_url, headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
+            resultado["pasos"].append({
+                "paso": "descarga_completa",
+                "status": resp.status_code,
+                "content_type": resp.headers.get("Content-Type",""),
+                "bytes": len(resp.content)
+            })
+        except Exception as e:
+            resultado["pasos"].append({"paso": "descarga_completa", "error": str(e)})
+
+    resultado["BROWSER_HEADERS_usados"] = BROWSER_HEADERS
+    return jsonify(resultado)
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
