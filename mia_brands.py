@@ -49,6 +49,24 @@ BRANDS = {
         "accent_color": (30, 100, 200),    # blue
         "fb_page_slug": "radioglobo989",
     },
+    "clasica": {
+        "name": "Siento 2.5",
+        "cms_domain": "cms.clasica1025.com",
+        "wp_api_base": "https://cms.clasica1025.com/wp-json/wp/v2",
+        "logo_file": "clasica_logo.png",
+        "logo_type": "file",
+        "accent_color": (207, 53, 41),     # red
+        "fb_page_slug": "clasica1025",
+    },
+    "949": {
+        "name": "949",
+        "cms_domain": "cms.949.com.gt",
+        "wp_api_base": "https://cms.949.com.gt/wp-json/wp/v2",
+        "logo_file": "949_logo.png",
+        "logo_type": "file",
+        "accent_color": (124, 222, 59),    # phosphorescent green
+        "fb_page_slug": "949",
+    },
 }
 
 # Shared image settings
@@ -486,6 +504,84 @@ def globo_debug_fetch():
     url = request.args.get("url", f"{BRANDS['globo']['wp_api_base']}/posts?per_page=1")
     try:
         session = _get_sg_session(BRANDS["globo"]["cms_domain"])
+        resp = session.get(url, timeout=20)
+        return jsonify({
+            "status_code": resp.status_code,
+            "content_type": resp.headers.get("content-type", ""),
+            "body_preview": resp.text[:500],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# CLASICA routes  (prefijo /clasica)
+# ---------------------------------------------------------------------------
+@mia_bp.route("/clasica/rss-proxy")
+def clasica_rss_proxy():
+    return _build_rss("clasica")
+
+
+@mia_bp.route("/clasica/generar-imagen")
+def clasica_generar_imagen():
+    titulo = request.args.get("titulo", "")
+    foto_url = request.args.get("foto_url", "")
+    if not titulo or not foto_url:
+        return Response("Faltan parametros: titulo, foto_url", status=400)
+    try:
+        img = _generate_branded_image("clasica", titulo, foto_url)
+    except Exception as e:
+        return Response(f"Error generando imagen: {e}", status=500)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/jpeg", as_attachment=False, download_name="clasica_noticia.jpg")
+
+
+@mia_bp.route("/clasica/debug-fetch")
+def clasica_debug_fetch():
+    url = request.args.get("url", f"{BRANDS['clasica']['wp_api_base']}/posts?per_page=1")
+    try:
+        session = _get_sg_session(BRANDS["clasica"]["cms_domain"])
+        resp = session.get(url, timeout=20)
+        return jsonify({
+            "status_code": resp.status_code,
+            "content_type": resp.headers.get("content-type", ""),
+            "body_preview": resp.text[:500],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# 949 routes  (prefijo /949)
+# ---------------------------------------------------------------------------
+@mia_bp.route("/949/rss-proxy")
+def n949_rss_proxy():
+    return _build_rss("949")
+
+
+@mia_bp.route("/949/generar-imagen")
+def n949_generar_imagen():
+    titulo = request.args.get("titulo", "")
+    foto_url = request.args.get("foto_url", "")
+    if not titulo or not foto_url:
+        return Response("Faltan parametros: titulo, foto_url", status=400)
+    try:
+        img = _generate_branded_image("949", titulo, foto_url)
+    except Exception as e:
+        return Response(f"Error generando imagen: {e}", status=500)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/jpeg", as_attachment=False, download_name="949_noticia.jpg")
+
+
+@mia_bp.route("/949/debug-fetch")
+def n949_debug_fetch():
+    url = request.args.get("url", f"{BRANDS['949']['wp_api_base']}/posts?per_page=1")
+    try:
+        session = _get_sg_session(BRANDS["949"]["cms_domain"])
         resp = session.get(url, timeout=20)
         return jsonify({
             "status_code": resp.status_code,
