@@ -403,11 +403,16 @@ def generar_imagen_sin_foto(titulo):
 
 def get_foto_bytes(foto_url):
     """
-    Descarga foto_url con fallback via Cloudinary.
+    Descarga foto_url con múltiples fallbacks.
     - Vacío → None
     - Descarga directa OK → bytes
-    - Captcha/anti-bot (cms.lared1061.com) → Cloudinary fetch como proxy → bytes
+    - Captcha/anti-bot (cms.lared1061.com bloqueado desde Render) → weserv.nl proxy → bytes
+    - weserv falla → Cloudinary upload proxy → bytes
     - Todo falla → None (imagen sin foto)
+
+    NOTA: cms.lared1061.com tiene Sucuri SG Captcha que bloquea IPs de datacenter
+    (Render, AWS, GCP, etc.) con HTTP 202. weserv.nl es un proxy de imágenes gratuito
+    cuyos servidores no están en la lista negra de Sucuri.
     """
     if not foto_url:
         return None
@@ -418,9 +423,25 @@ def get_foto_bytes(foto_url):
     except Exception as e1:
         app.logger.warning(f"Descarga directa falló: {str(e1)[:80]}")
 
-    # Fallback: Cloudinary como proxy
-    # Sus IPs no están bloqueadas por Sucuri SG Captcha de cms.lared1061.com
-    # También cubre: Max retries, captcha, connection refused, etc.
+    # Fallback 1: weserv.nl como proxy de imágenes
+    # Sus IPs no están bloqueadas por Sucuri. Funciona con cms.lared1061.com.
+    try:
+        from urllib.parse import urlparse, quote
+        # weserv acepta la URL sin protocolo: strip https://
+        url_sin_proto = foto_url.replace("https://", "").replace("http://", "")
+        weserv_url = f"https://images.weserv.nl/?url={url_sin_proto}&output=jpg&maxage=1d"
+        resp = requests.get(weserv_url, headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=20, allow_redirects=True)
+        ct = resp.headers.get("Content-Type", "")
+        if resp.status_code == 200 and ct.startswith("image/") and len(resp.content) > 500:
+            app.logger.info(f"Foto via weserv.nl OK ({len(resp.content)} bytes)")
+            return resp.content
+        else:
+            raise ValueError(f"weserv status={resp.status_code} ct={ct} bytes={len(resp.content)}")
+    except Exception as e_weserv:
+        app.logger.warning(f"weserv.nl proxy falló: {str(e_weserv)[:80]}")
+
+    # Fallback 2: Cloudinary upload como proxy (último recurso)
     try:
         result = cloudinary.uploader.upload(
             foto_url,
