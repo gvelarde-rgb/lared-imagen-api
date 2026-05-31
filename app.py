@@ -873,37 +873,3 @@ def rss_proxy():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
-
-@app.route("/debug-foto", methods=["GET"])
-def debug_foto():
-    import traceback
-    foto_url = request.args.get("url", "").strip()
-    if not foto_url:
-        return jsonify({"error": "?url= requerido"}), 400
-    results = {"BROWSER_HEADERS": BROWSER_HEADERS}
-    # Test descarga directa
-    try:
-        probe = requests.get(foto_url, headers=BROWSER_HEADERS, timeout=8, allow_redirects=False)
-        results["probe"] = {"status": probe.status_code, "size": len(probe.content), "ct": probe.headers.get("Content-Type","")}
-        resp = requests.get(foto_url, headers=BROWSER_HEADERS, timeout=20, allow_redirects=True)
-        results["full_get"] = {"status": resp.status_code, "size": len(resp.content), "ct": resp.headers.get("Content-Type","")}
-    except Exception as e:
-        results["error_download"] = traceback.format_exc()
-    # Test get_foto_bytes completo
-    try:
-        fb = get_foto_bytes(foto_url)
-        results["get_foto_bytes"] = {"success": fb is not None, "size": len(fb) if fb else 0}
-    except Exception as e:
-        results["get_foto_bytes_error"] = traceback.format_exc()
-    # Test generar imagen completa
-    try:
-        fb2 = get_foto_bytes(foto_url)
-        if fb2:
-            img_bytes = generar_imagen_bytes(fb2, "Test Debug")
-            results["generar_imagen"] = {"size": len(img_bytes)}
-        else:
-            results["generar_imagen"] = {"error": "foto_bytes es None"}
-    except Exception as e:
-        results["generar_imagen_error"] = traceback.format_exc()
-    return jsonify(results)
