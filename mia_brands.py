@@ -39,6 +39,7 @@ BRANDS = {
         "logo_type": "svg",
         "accent_color": (148, 50, 120),   # purple
         "fb_page_slug": "mia937",
+        "public_base": "https://www.mia937.com/articulo",
     },
     "globo": {
         "name": "Globo 989",
@@ -48,6 +49,7 @@ BRANDS = {
         "logo_type": "file",
         "accent_color": (30, 100, 200),    # blue
         "fb_page_slug": "radioglobo989",
+        "public_base": "https://www.globo989.com/articulo",
     },
     "clasica": {
         "name": "Siento 2.5",
@@ -57,6 +59,7 @@ BRANDS = {
         "logo_type": "file",
         "accent_color": (207, 53, 41),     # red
         "fb_page_slug": "clasica1025",
+        "public_base": "https://www.clasica1025.com/articulo",
     },
     "949": {
         "name": "949",
@@ -66,6 +69,7 @@ BRANDS = {
         "logo_type": "file",
         "accent_color": (124, 222, 59),    # phosphorescent green
         "fb_page_slug": "949",
+        "public_base": "https://www.949.com.gt/articulo",
     },
 }
 
@@ -274,7 +278,13 @@ def _build_rss(brand_key: str) -> Response:
     items_xml = []
     for post in posts:
         title = html_mod.unescape(post.get("title", {}).get("rendered", ""))
-        link = post.get("link", "")
+        slug = post.get("slug", "")
+        public_base = brand.get("public_base", "").rstrip("/")
+        if slug and public_base:
+            link = f"{public_base}/{slug}"
+        else:
+            # fallback defensivo: convertir cms.->www. del link crudo
+            link = post.get("link", "").replace("https://cms.", "https://www.")
         excerpt = post.get("excerpt", {}).get("rendered", "")
         excerpt_text = re.sub(r"<[^>]+>", "", html_mod.unescape(excerpt)).strip()
         pub_date = ""
