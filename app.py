@@ -684,12 +684,55 @@ def _get_media_url(media_id):
 
 
 def _wp_date_to_rfc2822(date_str):
-    """Convierte '2026-05-04T14:30:00' → RFC 2822 para RSS."""
+    """Convierte '2026-05-04T14:30:00' (date_gmt de WP, ya en UTC) → RFC 2822 GMT."""
     try:
         dt = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
         return formatdate(dt.timestamp(), usegmt=True)
     except Exception:
         return formatdate(usegmt=True)
+
+
+# Desfase de zona horaria de Guatemala respecto a GMT (UTC-6).
+# El feed de Vercel etiqueta las fechas locales (GT) como si fueran GMT,
+# atrasando cada nota 6h. Sumamos 6h para corregir a GMT real.
+_GT_TO_GMT_SECONDS = 6 * 3600
+
+
+def _fix_vercel_tz(xml_bytes):
+    """
+    Corrige el desfase de 6h del feed de Vercel.
+
+    Vercel toma la fecha LOCAL de WordPress (hora Guatemala, campo `date`) y la
+    etiqueta como GMT -> cada <pubDate> queda 6h atrasado. Para Make eso hace que
+    cada nota nueva nazca "vieja" (por debajo del puntero del trigger) y nunca se
+    publique. Aqui parseamos cada <pubDate>, le sumamos 6h y re-serializamos.
+
+    Solo corrige fechas que NO traen offset explicito distinto de +0000/GMT
+    (si algun dia Vercel arregla el feed y manda offset real, no lo tocamos).
+    """
+    import re as _re
+    try:
+        text = xml_bytes.decode("utf-8", "ignore")
+    except Exception:
+        return xml_bytes
+
+    def _bump(m):
+        raw = m.group(1).strip()
+        try:
+            dt = parsedate_to_datetime(raw)
+        except Exception:
+            return m.group(0)
+        # parsedate_to_datetime de "... GMT" o "... +0000" da tz=UTC.
+        # Si el feed YA trae un offset real distinto de 0, asumimos que esta
+        # bien y no lo tocamos.
+        off = dt.utcoffset()
+        if off is not None and off.total_seconds() != 0:
+            return m.group(0)
+        fixed = formatdate(dt.timestamp() + _GT_TO_GMT_SECONDS, usegmt=True)
+        return f"<pubDate>{fixed}</pubDate>"
+
+    fixed_text = _re.sub(r"<pubDate>(.*?)</pubDate>", _bump, text, flags=_re.S)
+    return fixed_text.encode("utf-8")
 
 
 def _escape_xml(text):
@@ -805,11 +848,15 @@ def _build_feed_from_nextjs():
                 # Fecha REAL/ya-fijada conocida -> usarla siempre (estable).
                 pub_date = cached_date
             else:
-                # Nota nueva aun no presente en Vercel. Le asignamos "ahora" UNA
-                # sola vez y la PERSISTIMOS por GUID en disco, asi TODOS los
-                # workers devuelven la MISMA fecha en llamadas siguientes (no
-                # cambia a "ahora-Ns" en cada request -> no desincroniza Make).
-                pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
+                # Nota SIN fecha real conocida (Vercel aun no la trae). NUNCA le
+                # damos "ahora": una fecha futura/reciente sintetica envenena el
+                # puntero de Make (la veria como "la mas nueva" y al cambiar luego
+                # desincroniza). En su lugar le damos una fecha VIEJA estable
+                # (epoch base - pos), asi queda al fondo del feed y no se trata
+                # como novedad hasta que Vercel publique su fecha REAL (entonces
+                # se cachea y sube al lugar correcto). Persistimos por GUID.
+                _OLD_BASE = 1700000000  # 2023, claramente vieja
+                pub_date = formatdate(_OLD_BASE - (_pos * 60), usegmt=True)
                 _real_dates[real_link] = pub_date
                 _save_real_dates(_real_dates)
         _pos += 1
@@ -859,7 +906,7 @@ def _build_feed_from_wp():
     """Construye RSS desde WP REST API directa. Último recurso."""
     r = requests.get(
         f"{WP_API}/posts",
-        params={"per_page": 20, "_fields": "id,title,date,link,categories,featured_media", "status": "publish"},
+        params={"per_page": 20, "_fields": "id,title,date_gmt,link,categories,featured_media", "status": "publish"},
         headers=WP_HEADERS,
         timeout=WP_TIMEOUT
     )
@@ -871,7 +918,7 @@ def _build_feed_from_wp():
         title = _escape_xml(p.get("title", {}).get("rendered", ""))
         slug = p.get("link", "").rstrip("/").split("/")[-1]
         pub_link = f"https://www.lared1061.com/posts/{slug}"
-        pub_date = _wp_date_to_rfc2822(p.get("date", ""))
+        pub_date = _wp_date_to_rfc2822(p.get("date_gmt", ""))
         cat_names = [_CAT_NAMES.get(cid, str(cid)) for cid in p.get("categories", [])]
         categories_xml = "".join(f"<category>{_escape_xml(c)}</category>" for c in cat_names)
         media_id = p.get("featured_media") or 0
@@ -936,7 +983,7 @@ def _vercel_feed_is_fresh(xml_bytes):
         # asi que un umbral suave: si faltan 3+ de las 10 mas recientes, el feed de
         # Vercel se quedo atascado y no trae las notas nuevas -> usar scraper.
         faltantes = sum(1 for s in top_home if s not in feed_slugs)
-        if faltantes >= 3:
+        if faltantes >= 6:
             app.logger.warning(f"Vercel RSS desactualizado: faltan {faltantes}/10 notas recientes del home")
             return False
         return True
@@ -974,13 +1021,15 @@ def rss_proxy():
         )
         if resp.ok and len(resp.content) > 500:
             ET.fromstring(resp.content)  # validar XML
-            _remember_real_dates(resp.content)  # cachear fechas reales SIEMPRE
+            # Corregir el desfase de 6h (Vercel etiqueta hora GT como GMT).
+            vercel_xml = _fix_vercel_tz(resp.content)
+            _remember_real_dates(vercel_xml)  # cachear fechas YA corregidas
             if _vercel_feed_is_fresh(resp.content):
-                _feed_cache["xml"] = resp.content
+                _feed_cache["xml"] = vercel_xml
                 _feed_cache["ts"] = time.time()
                 _feed_cache["source"] = "vercel"
-                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (primaria)")
-                return Response(resp.content, mimetype="application/rss+xml")
+                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (primaria, tz corregida)")
+                return Response(vercel_xml, mimetype="application/rss+xml")
             else:
                 app.logger.warning("rss-proxy: Vercel RSS atascado, usando scraper Next.js")
     except Exception as e:
