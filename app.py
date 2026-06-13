@@ -697,8 +697,12 @@ def _escape_xml(text):
 
 
 # Cache global del último feed exitoso (sobrevive cold starts en memoria)
-_feed_cache = {"xml": None, "ts": 0}
+_feed_cache = {"xml": None, "ts": 0, "source": None}
 _FEED_CACHE_TTL = 3600  # 1 hora máximo
+
+# Cache de fechas REALES por GUID (URL de la nota). Lo llenan WP/Vercel y lo usa
+# el scraper de emergencia para NO inventar fechas y no confundir a Make.
+_real_dates = {}  # { guid_url: pubDate_rfc2822 }
 
 VERCEL_RSS = "https://www.lared1061.com/feed"
 VERCEL_TIMEOUT = 12
@@ -751,13 +755,12 @@ def _build_feed_from_nextjs():
     # Deduplicar por slug manteniendo orden
     seen_slugs = set()
     items = []
-    # IMPORTANTE: El home Next.js NO expone la fecha real de cada nota, pero las
-    # lista en orden cronologico (mas nueva primero). El trigger rss:TriggerNewArticle
-    # de Make detecta "nuevo" comparando pubDate; si todas tienen la MISMA fecha
-    # ("ahora"), Make no puede ordenar ni saber cual es la mas reciente y deja de
-    # publicar. Por eso asignamos pubDates DECRECIENTES segun la posicion:
-    # nota 0 = ahora, nota 1 = ahora-60s, nota 2 = ahora-120s, etc.
-    # Asi Make siempre identifica correctamente la nota mas nueva (posicion 0).
+    # El home Next.js NO expone la fecha real de cada nota. Para NO confundir el
+    # puntero de Make, NO inventamos fechas "ahora-60s" (eso rejuvenece notas
+    # viejas). En su lugar reusamos la fecha REAL cacheada por GUID (la llenan
+    # WP/Vercel). Si una nota no tiene fecha cacheada (primera vez que la vemos),
+    # le damos una base decreciente desde "ahora" SOLO como ultimo recurso, para
+    # preservar el orden cronologico del home. Esta capa es de emergencia.
     _now_ts = time.time()
     _pos = 0
     for path, slug, title_raw in raw_posts[:40]:
@@ -769,7 +772,12 @@ def _build_feed_from_nextjs():
 
         title = _escape_xml(title_raw.strip())
         pub_link = _escape_xml(f"https://www.lared1061.com{path}")
-        pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
+        real_link = f"https://www.lared1061.com{path}"
+        cached_date = _real_dates.get(real_link)
+        if cached_date:
+            pub_date = cached_date
+        else:
+            pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
         _pos += 1
 
         foto_url = img_map.get(title_raw.strip(), "")
@@ -896,17 +904,35 @@ def _vercel_feed_is_fresh(xml_bytes):
 @app.route("/rss-proxy", methods=["GET"])
 def rss_proxy():
     """
-    RSS proxy con capas de resiliencia:
-    1. RSS de Vercel (www.lared1061.com/feed) — SOLO si esta fresco vs el home
-    1.5. Scraper Next.js (www.lared1061.com HTML) — refleja el sitio real, fechas
-         decrecientes por posicion para que Make detecte orden/novedad
-    2. Cache en memoria del último feed exitoso — hasta 1 hora
-    3. WP REST API directa — último recurso
+    RSS proxy con UNA FUENTE DE VERDAD: la WP REST API, que devuelve fechas
+    REALES y exactas + GUID estable (URL canonica). Esto evita que el puntero
+    interno del trigger de Make se desincronice y deje notas sin publicar.
+
+    Orden de capas (de mas confiable a emergencia):
+    1. WP REST API directa  -> PRIMARIA. Fechas reales, GUID = URL estable.
+    2. RSS de Vercel        -> respaldo si WP falla.
+    3. Cache en memoria     -> ultimo feed bueno (hasta 1h).
+    4. Scraper Next.js      -> ultimo recurso. Reusa fechas reales cacheadas por
+                               GUID (NO inventa "ahora-60s") para no rejuvenecer
+                               notas viejas y confundir a Make.
     """
     global _feed_cache
     import xml.etree.ElementTree as ET
 
-    # --- Capa 1: RSS Vercel (solo si NO esta atascado) ---
+    # --- Capa 1: WP REST API directa (FUENTE PRIMARIA, fechas reales) ---
+    try:
+        feed_xml = _build_feed_from_wp()
+        ET.fromstring(feed_xml)  # validar XML
+        _remember_real_dates(feed_xml)
+        _feed_cache["xml"] = feed_xml
+        _feed_cache["ts"] = time.time()
+        _feed_cache["source"] = "wp"
+        app.logger.info("rss-proxy: sirviendo desde WP REST API (primaria)")
+        return Response(feed_xml, mimetype="application/rss+xml")
+    except Exception as e:
+        app.logger.warning(f"rss-proxy capa1 (WP REST API) falló: {type(e).__name__}: {e}")
+
+    # --- Capa 2: RSS Vercel (respaldo, solo si esta fresco) ---
     try:
         resp = requests.get(
             VERCEL_RSS,
@@ -916,91 +942,86 @@ def rss_proxy():
         if resp.ok and len(resp.content) > 500:
             ET.fromstring(resp.content)  # validar XML
             if _vercel_feed_is_fresh(resp.content):
+                _remember_real_dates(resp.content)
                 _feed_cache["xml"] = resp.content
                 _feed_cache["ts"] = time.time()
-                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (fresco)")
+                _feed_cache["source"] = "vercel"
+                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (respaldo)")
                 return Response(resp.content, mimetype="application/rss+xml")
             else:
-                app.logger.warning("rss-proxy: Vercel RSS atascado, usando scraper Next.js")
+                app.logger.warning("rss-proxy: Vercel RSS atascado")
     except Exception as e:
-        app.logger.warning(f"rss-proxy capa1 (Vercel) falló: {type(e).__name__}: {e}")
+        app.logger.warning(f"rss-proxy capa2 (Vercel) falló: {type(e).__name__}: {e}")
 
-    # --- Capa 1.5: Scraper Next.js (www.lared1061.com HTML) ---
-    try:
-        feed_xml = _build_feed_from_nextjs()
-        _feed_cache["xml"] = feed_xml
-        _feed_cache["ts"] = time.time()
-        app.logger.info("rss-proxy: sirviendo desde Next.js scraper")
-        return Response(feed_xml, mimetype="application/rss+xml")
-    except Exception as e:
-        app.logger.warning(f"rss-proxy capa1.5 (Next.js scraper) falló: {type(e).__name__}: {e}")
-
-    # --- Capa 2: Cache en memoria ---
+    # --- Capa 3: Cache en memoria ---
     if _feed_cache["xml"] and (time.time() - _feed_cache["ts"]) < _FEED_CACHE_TTL:
         app.logger.info("rss-proxy: sirviendo desde cache")
         return Response(_feed_cache["xml"], mimetype="application/rss+xml")
 
-    # --- Capa 3: WP REST API directa ---
+    # --- Capa 4: Scraper Next.js (emergencia, fechas reales cacheadas) ---
     try:
-        feed_xml = _build_feed_from_wp()
+        feed_xml = _build_feed_from_nextjs()
         _feed_cache["xml"] = feed_xml
         _feed_cache["ts"] = time.time()
-        app.logger.info("rss-proxy: sirviendo desde WP REST API")
+        _feed_cache["source"] = "nextjs"
+        app.logger.info("rss-proxy: sirviendo desde Next.js scraper (emergencia)")
         return Response(feed_xml, mimetype="application/rss+xml")
     except Exception as e:
-        app.logger.error(f"rss-proxy capa3 (WP REST API) falló: {e}")
+        app.logger.error(f"rss-proxy capa4 (Next.js scraper) falló: {e}")
 
     return Response("Feed temporalmente no disponible", status=503, mimetype="text/plain")
 
 
-
-@app.route("/rss-rescate", methods=["GET"])
-def rss_rescate():
-    """
-    Ruta TEMPORAL de rescate. Toma el feed normal y altera los GUID/link
-    (sufijo unico) para que el trigger RSS de Make los trate como notas NUEVAS
-    y las republique, incluyendo las que quedaron atrapadas.
-    Acepta ?n=15 para limitar items y ?tag=xxx para el sufijo de unicidad.
-    Quitar/ignorar esta ruta despues del rescate.
-    """
-    import xml.etree.ElementTree as ET
-    # GUID unico por request: cada llamada produce GUIDs distintos, asi el
-    # trigger de Make (que ya fijo baseline en el run previo) los ve nuevos.
-    tag = request.args.get("tag") or f"{int(time.time())}-{os.urandom(3).hex()}"
+def _remember_real_dates(xml_bytes):
+    """Guarda las fechas reales (pubDate) indexadas por GUID/link."""
+    import re as _re
     try:
-        n = int(request.args.get("n", "15"))
-    except ValueError:
-        n = 15
-
-    # Reusar la logica del proxy para obtener el feed base
-    try:
-        feed_xml = _build_feed_from_nextjs()
+        txt = xml_bytes.decode("utf-8", "ignore") if isinstance(xml_bytes, bytes) else xml_bytes
+        for item in _re.findall(r"<item>.*?</item>", txt, _re.DOTALL):
+            link_m = _re.search(r"<link>([^<]+)</link>", item)
+            date_m = _re.search(r"<pubDate>([^<]+)</pubDate>", item)
+            if link_m and date_m:
+                _real_dates[link_m.group(1).strip()] = date_m.group(1).strip()
     except Exception:
-        feed_xml = _feed_cache.get("xml")
-        if not feed_xml:
-            try:
-                feed_xml = _build_feed_from_wp()
-            except Exception as e:
-                return Response(f"rescate: feed no disponible: {e}", status=503)
+        pass
 
-    root = ET.fromstring(feed_xml)
-    channel = root.find("channel") or root
-    items = channel.findall("item")
-    # Limitar a n
-    for extra in items[n:]:
-        channel.remove(extra)
-    items = channel.findall("item")
-    for it in items:
-        g = it.find("guid")
-        if g is not None and g.text:
-            g.text = f"{g.text}#rescate-{tag}"
-        else:
-            link = it.find("link")
-            base = link.text if (link is not None and link.text) else "x"
-            ng = ET.SubElement(it, "guid")
-            ng.text = f"{base}#rescate-{tag}"
-    out = ET.tostring(root, encoding="utf-8")
-    return Response(out, mimetype="application/rss+xml")
+
+@app.route("/rss-health", methods=["GET"])
+def rss_health():
+    """Salud del feed: fuente usada, nº items, fecha de la nota mas nueva y
+    si hay desfase entre WP y Vercel. Para monitorear sin adivinar."""
+    import xml.etree.ElementTree as ET
+    out = {"source": None, "items": 0, "newest": None, "wp_ok": False,
+           "vercel_ok": False, "vercel_fresh": None, "desfase": None}
+    # WP
+    try:
+        wp_xml = _build_feed_from_wp()
+        root = ET.fromstring(wp_xml)
+        items = root.findall(".//item")
+        out["wp_ok"] = True
+        out["items"] = len(items)
+        if items:
+            pd = items[0].find("pubDate")
+            out["newest"] = pd.text if pd is not None else None
+        wp_links = {it.find("link").text for it in items if it.find("link") is not None}
+    except Exception as e:
+        wp_links = set()
+        out["wp_error"] = f"{type(e).__name__}: {e}"
+    # Vercel
+    try:
+        resp = requests.get(VERCEL_RSS, headers={"User-Agent": "Mozilla/5.0"}, timeout=VERCEL_TIMEOUT)
+        if resp.ok and len(resp.content) > 500:
+            out["vercel_ok"] = True
+            out["vercel_fresh"] = _vercel_feed_is_fresh(resp.content)
+            import re as _re
+            v_links = set(_re.findall(r"<link>([^<]+)</link>", resp.content.decode("utf-8", "ignore")))
+            if wp_links:
+                out["desfase"] = len([l for l in wp_links if l not in v_links])
+    except Exception as e:
+        out["vercel_error"] = f"{type(e).__name__}: {e}"
+    out["source"] = _feed_cache.get("source")
+    return jsonify(out)
+
 
 
 if __name__ == "__main__":
