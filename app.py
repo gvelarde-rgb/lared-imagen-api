@@ -751,6 +751,15 @@ def _build_feed_from_nextjs():
     # Deduplicar por slug manteniendo orden
     seen_slugs = set()
     items = []
+    # IMPORTANTE: El home Next.js NO expone la fecha real de cada nota, pero las
+    # lista en orden cronologico (mas nueva primero). El trigger rss:TriggerNewArticle
+    # de Make detecta "nuevo" comparando pubDate; si todas tienen la MISMA fecha
+    # ("ahora"), Make no puede ordenar ni saber cual es la mas reciente y deja de
+    # publicar. Por eso asignamos pubDates DECRECIENTES segun la posicion:
+    # nota 0 = ahora, nota 1 = ahora-60s, nota 2 = ahora-120s, etc.
+    # Asi Make siempre identifica correctamente la nota mas nueva (posicion 0).
+    _now_ts = time.time()
+    _pos = 0
     for path, slug, title_raw in raw_posts[:40]:
         if slug in seen_slugs:
             continue
@@ -760,7 +769,8 @@ def _build_feed_from_nextjs():
 
         title = _escape_xml(title_raw.strip())
         pub_link = _escape_xml(f"https://www.lared1061.com{path}")
-        pub_date = formatdate(usegmt=True)
+        pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
+        _pos += 1
 
         foto_url = img_map.get(title_raw.strip(), "")
         media_xml = (
