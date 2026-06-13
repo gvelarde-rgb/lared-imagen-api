@@ -775,9 +775,15 @@ def _build_feed_from_nextjs():
         real_link = f"https://www.lared1061.com{path}"
         cached_date = _real_dates.get(real_link)
         if cached_date:
+            # Fecha REAL conocida (de Vercel/WP) -> usarla siempre.
             pub_date = cached_date
         else:
+            # Nota nueva aun no presente en Vercel. Le asignamos "ahora" UNA sola
+            # vez y la CACHEAMOS por GUID, asi en llamadas siguientes su fecha es
+            # ESTABLE (no cambia a "ahora-60s" en cada request). El offset por
+            # posicion preserva el orden cronologico del primer avistamiento.
             pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
+            _real_dates[real_link] = pub_date
         _pos += 1
 
         foto_url = img_map.get(title_raw.strip(), "")
@@ -904,35 +910,24 @@ def _vercel_feed_is_fresh(xml_bytes):
 @app.route("/rss-proxy", methods=["GET"])
 def rss_proxy():
     """
-    RSS proxy con UNA FUENTE DE VERDAD: la WP REST API, que devuelve fechas
-    REALES y exactas + GUID estable (URL canonica). Esto evita que el puntero
-    interno del trigger de Make se desincronice y deje notas sin publicar.
+    RSS proxy con fechas REALES y coherentes para que el puntero interno del
+    trigger de Make NO se desincronice y deje notas sin publicar.
 
-    Orden de capas (de mas confiable a emergencia):
-    1. WP REST API directa  -> PRIMARIA. Fechas reales, GUID = URL estable.
-    2. RSS de Vercel        -> respaldo si WP falla.
+    Nota: la WP REST API esta bloqueada por el WAF de SiteGround/Sucuri desde
+    IPs de datacenter (Render), asi que NO se usa como primaria en prod. Vercel
+    SI es accesible y trae fechas reales. Orden de capas:
+
+    1. RSS de Vercel        -> PRIMARIA si esta fresco. Fechas reales, GUID estable.
+    2. Scraper Next.js      -> si Vercel esta atascado. Reusa fechas reales
+                               cacheadas por GUID desde Vercel (NO inventa
+                               "ahora-60s" para notas ya conocidas).
     3. Cache en memoria     -> ultimo feed bueno (hasta 1h).
-    4. Scraper Next.js      -> ultimo recurso. Reusa fechas reales cacheadas por
-                               GUID (NO inventa "ahora-60s") para no rejuvenecer
-                               notas viejas y confundir a Make.
+    4. WP REST API directa  -> ultimo recurso (suele fallar por WAF en prod).
     """
     global _feed_cache
     import xml.etree.ElementTree as ET
 
-    # --- Capa 1: WP REST API directa (FUENTE PRIMARIA, fechas reales) ---
-    try:
-        feed_xml = _build_feed_from_wp()
-        ET.fromstring(feed_xml)  # validar XML
-        _remember_real_dates(feed_xml)
-        _feed_cache["xml"] = feed_xml
-        _feed_cache["ts"] = time.time()
-        _feed_cache["source"] = "wp"
-        app.logger.info("rss-proxy: sirviendo desde WP REST API (primaria)")
-        return Response(feed_xml, mimetype="application/rss+xml")
-    except Exception as e:
-        app.logger.warning(f"rss-proxy capa1 (WP REST API) falló: {type(e).__name__}: {e}")
-
-    # --- Capa 2: RSS Vercel (respaldo, solo si esta fresco) ---
+    # --- Capa 1: RSS Vercel (PRIMARIA, fechas reales, solo si esta fresco) ---
     try:
         resp = requests.get(
             VERCEL_RSS,
@@ -941,33 +936,46 @@ def rss_proxy():
         )
         if resp.ok and len(resp.content) > 500:
             ET.fromstring(resp.content)  # validar XML
+            _remember_real_dates(resp.content)  # cachear fechas reales SIEMPRE
             if _vercel_feed_is_fresh(resp.content):
-                _remember_real_dates(resp.content)
                 _feed_cache["xml"] = resp.content
                 _feed_cache["ts"] = time.time()
                 _feed_cache["source"] = "vercel"
-                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (respaldo)")
+                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (primaria)")
                 return Response(resp.content, mimetype="application/rss+xml")
             else:
-                app.logger.warning("rss-proxy: Vercel RSS atascado")
+                app.logger.warning("rss-proxy: Vercel RSS atascado, usando scraper Next.js")
     except Exception as e:
-        app.logger.warning(f"rss-proxy capa2 (Vercel) falló: {type(e).__name__}: {e}")
+        app.logger.warning(f"rss-proxy capa1 (Vercel) falló: {type(e).__name__}: {e}")
+
+    # --- Capa 2: Scraper Next.js (fechas reales cacheadas desde Vercel) ---
+    try:
+        feed_xml = _build_feed_from_nextjs()
+        _feed_cache["xml"] = feed_xml
+        _feed_cache["ts"] = time.time()
+        _feed_cache["source"] = "nextjs"
+        app.logger.info("rss-proxy: sirviendo desde Next.js scraper")
+        return Response(feed_xml, mimetype="application/rss+xml")
+    except Exception as e:
+        app.logger.warning(f"rss-proxy capa2 (Next.js scraper) falló: {type(e).__name__}: {e}")
 
     # --- Capa 3: Cache en memoria ---
     if _feed_cache["xml"] and (time.time() - _feed_cache["ts"]) < _FEED_CACHE_TTL:
         app.logger.info("rss-proxy: sirviendo desde cache")
         return Response(_feed_cache["xml"], mimetype="application/rss+xml")
 
-    # --- Capa 4: Scraper Next.js (emergencia, fechas reales cacheadas) ---
+    # --- Capa 4: WP REST API directa (ultimo recurso) ---
     try:
-        feed_xml = _build_feed_from_nextjs()
+        feed_xml = _build_feed_from_wp()
+        ET.fromstring(feed_xml)
+        _remember_real_dates(feed_xml)
         _feed_cache["xml"] = feed_xml
         _feed_cache["ts"] = time.time()
-        _feed_cache["source"] = "nextjs"
-        app.logger.info("rss-proxy: sirviendo desde Next.js scraper (emergencia)")
+        _feed_cache["source"] = "wp"
+        app.logger.info("rss-proxy: sirviendo desde WP REST API (ultimo recurso)")
         return Response(feed_xml, mimetype="application/rss+xml")
     except Exception as e:
-        app.logger.error(f"rss-proxy capa4 (Next.js scraper) falló: {e}")
+        app.logger.error(f"rss-proxy capa4 (WP REST API) falló: {e}")
 
     return Response("Feed temporalmente no disponible", status=503, mimetype="text/plain")
 
