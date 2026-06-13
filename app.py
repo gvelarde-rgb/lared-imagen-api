@@ -702,7 +702,29 @@ _FEED_CACHE_TTL = 3600  # 1 hora máximo
 
 # Cache de fechas REALES por GUID (URL de la nota). Lo llenan WP/Vercel y lo usa
 # el scraper de emergencia para NO inventar fechas y no confundir a Make.
-_real_dates = {}  # { guid_url: pubDate_rfc2822 }
+# PERSISTIDO en disco para que los multiples workers de gunicorn compartan las
+# mismas fechas (si no, cada worker inventa una fecha distinta y desincroniza Make).
+import json as _json
+_REAL_DATES_FILE = "/tmp/lared_real_dates.json"
+_real_dates_lock = threading.Lock()
+
+def _load_real_dates():
+    try:
+        with open(_REAL_DATES_FILE, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+def _save_real_dates(d):
+    try:
+        tmp = _REAL_DATES_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            _json.dump(d, f)
+        os.replace(tmp, _REAL_DATES_FILE)
+    except Exception:
+        pass
+
+_real_dates = _load_real_dates()  # { guid_url: pubDate_rfc2822 }, compartido en disco
 
 VERCEL_RSS = "https://www.lared1061.com/feed"
 VERCEL_TIMEOUT = 12
@@ -773,17 +795,23 @@ def _build_feed_from_nextjs():
         title = _escape_xml(title_raw.strip())
         pub_link = _escape_xml(f"https://www.lared1061.com{path}")
         real_link = f"https://www.lared1061.com{path}"
-        cached_date = _real_dates.get(real_link)
-        if cached_date:
-            # Fecha REAL conocida (de Vercel/WP) -> usarla siempre.
-            pub_date = cached_date
-        else:
-            # Nota nueva aun no presente en Vercel. Le asignamos "ahora" UNA sola
-            # vez y la CACHEAMOS por GUID, asi en llamadas siguientes su fecha es
-            # ESTABLE (no cambia a "ahora-60s" en cada request). El offset por
-            # posicion preserva el orden cronologico del primer avistamiento.
-            pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
-            _real_dates[real_link] = pub_date
+        with _real_dates_lock:
+            # Recargar del disco para ver fechas que otro worker ya fijo.
+            disk = _load_real_dates()
+            if disk:
+                _real_dates.update(disk)
+            cached_date = _real_dates.get(real_link)
+            if cached_date:
+                # Fecha REAL/ya-fijada conocida -> usarla siempre (estable).
+                pub_date = cached_date
+            else:
+                # Nota nueva aun no presente en Vercel. Le asignamos "ahora" UNA
+                # sola vez y la PERSISTIMOS por GUID en disco, asi TODOS los
+                # workers devuelven la MISMA fecha en llamadas siguientes (no
+                # cambia a "ahora-Ns" en cada request -> no desincroniza Make).
+                pub_date = formatdate(_now_ts - (_pos * 60), usegmt=True)
+                _real_dates[real_link] = pub_date
+                _save_real_dates(_real_dates)
         _pos += 1
 
         foto_url = img_map.get(title_raw.strip(), "")
@@ -981,15 +1009,25 @@ def rss_proxy():
 
 
 def _remember_real_dates(xml_bytes):
-    """Guarda las fechas reales (pubDate) indexadas por GUID/link."""
+    """Guarda las fechas reales (pubDate) indexadas por GUID/link.
+    Las fechas REALES de Vercel/WP sobreescriben cualquier fecha sintetica
+    previa (asi una nota que era nueva adopta su fecha real cuando aparece)."""
     import re as _re
     try:
         txt = xml_bytes.decode("utf-8", "ignore") if isinstance(xml_bytes, bytes) else xml_bytes
-        for item in _re.findall(r"<item>.*?</item>", txt, _re.DOTALL):
-            link_m = _re.search(r"<link>([^<]+)</link>", item)
-            date_m = _re.search(r"<pubDate>([^<]+)</pubDate>", item)
-            if link_m and date_m:
-                _real_dates[link_m.group(1).strip()] = date_m.group(1).strip()
+        with _real_dates_lock:
+            disk = _load_real_dates()
+            if disk:
+                _real_dates.update(disk)
+            changed = False
+            for item in _re.findall(r"<item>.*?</item>", txt, _re.DOTALL):
+                link_m = _re.search(r"<link>([^<]+)</link>", item)
+                date_m = _re.search(r"<pubDate>([^<]+)</pubDate>", item)
+                if link_m and date_m:
+                    _real_dates[link_m.group(1).strip()] = date_m.group(1).strip()
+                    changed = True
+            if changed:
+                _save_real_dates(_real_dates)
     except Exception:
         pass
 
