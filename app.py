@@ -18,7 +18,7 @@ import hashlib
 import base64
 import threading
 import time
-from email.utils import formatdate
+from email.utils import formatdate, parsedate_to_datetime
 from datetime import datetime, timezone
 
 app = Flask(__name__)
@@ -820,16 +820,26 @@ def _build_feed_from_nextjs():
             if foto_url else ""
         )
 
-        items.append(f"""    <item>
+        try:
+            _sort_ts = parsedate_to_datetime(pub_date).timestamp()
+        except Exception:
+            _sort_ts = _now_ts - (_pos * 60)
+
+        items.append((_sort_ts, f"""    <item>
       <title>{title}</title>
       <link>{pub_link}</link>
       <guid isPermaLink="true">{pub_link}</guid>
       <pubDate>{pub_date}</pubDate>
       {media_xml}
-    </item>""")
+    </item>"""))
 
     if not items:
         raise ValueError("Lista de items vacía tras parsear Next.js")
+
+    # Ordenar descendente por fecha real: la nota más reciente SIEMPRE arriba,
+    # así Make detecta novedades correctamente (procesa el feed de arriba abajo).
+    items.sort(key=lambda t: t[0], reverse=True)
+    items = [xml for _, xml in items]
 
     feed = f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
