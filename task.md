@@ -1,28 +1,23 @@
-# La Red - Fix publicacion Facebook (13 jun 2026)
+# La Red RSS->Facebook — Blindaje del feed (COMPLETADO 13 jun 2026)
 
-## PROBLEMA
-La Red dejo de publicar a Facebook desde ~12:33 UTC (6:33 AM GT).
-Todas las ejecuciones de Make daban 1 op (no detectaba notas nuevas).
+## Objetivo
+Que las notas NUEVAS nunca se queden sin publicar en Facebook (scenario Make 4634525).
 
-## CAUSA RAIZ
-1. Vercel RSS (www.lared1061.com/feed) cayo con HTTP 500
-2. Proxy cayo a Capa 1.5 (scraper Next.js)
-3. Scraper ponia pubDate = "ahora" en TODAS las notas (linea 763 app.py)
-4. Make rss:TriggerNewArticle usa pubDate para detectar novedad
-   - maxResults=1, depende 100% de pubDate
-   - con todas las fechas iguales no puede ordenar ni detectar nuevo -> 1 op
+## Causa raiz resuelta
+1. WP REST API bloqueada por WAF desde IP Render -> el feed caia a scraper que inventaba fechas sinteticas cambiantes (ahora-Ns) -> Make desincronizaba su puntero por GUID/pubDate.
+2. Render corre 2 workers gunicorn; cada worker tenia su _real_dates en memoria -> fechas distintas por request.
 
-## FIX APLICADO (commit 587c3c0)
-- pubDate decreciente por posicion: nota0=ahora, nota1=ahora-60s, etc.
-- Mantiene orden cronologico correcto aunque Vercel este caido
-- Deploy dep-d8mmcgvlk1mc738sb72g LIVE
+## Fix aplicado (commits 0c97450 + f12c1e7)
+- Vercel (lared1061.com/feed) es la fuente PRIMARIA (accesible desde cualquier IP, fechas reales, GUID estable).
+- Orden de capas: 1.Vercel fresco  2.scraper Next.js  3.cache memoria  4.WP REST.
+- _real_dates PERSISTIDO en /tmp/lared_real_dates.json, compartido entre workers con lock -> fechas 100% coherentes entre llamadas y workers.
+- Notas reales (Vercel/WP) sobreescriben fechas sinteticas cuando aparecen.
+- +/rss-health (monitoreo), -/rss-rescate (eliminada).
 
-## ESTADO ACTUAL
-- Vercel RSS YA volvio (HTTP 200) -> sirve fechas REALES otra vez
-- Fix es proteccion permanente para cuando Vercel vuelva a caer
-- Ejecucion forzada 8145e1f9 = SUCCESS
-- Pendiente: confirmar que publica cuando salga nota NUEVA
+## Verificado en PROD
+- /rss-proxy: 20 items, fecha "Nace un gigante" IDENTICA en 6 llamadas seguidas (ambos workers).
+- Make 4634525: isActive=true, isinvalid=false, cada 5min, url=/rss-proxy, maxResults=3, ids [1,8,5,3] intactos.
+- Run 15:27:55 -> status:1, ops:1, transfer:3363 = exito con datos reales.
 
-## NOTA
-- Errores OAuthException de FB (12 jun 14:03-14:18) fueron caida temporal de Facebook, NO del sistema
-- mia_brands.py tiene merge externo b8181c0 (links /articulo/) - no afecta
+## Pendiente opcional (decision usuario)
+- Upgrade Render srv-d71d17nkijhs73cipvbg a plan "standard" (~$7/mes) para que no duerma (plan starter duerme 15min sin trafico; el primer hit tras dormir tarda ~30s).
