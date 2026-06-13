@@ -847,18 +847,62 @@ def _build_feed_from_wp():
     return feed.encode("utf-8")
 
 
+def _vercel_feed_is_fresh(xml_bytes):
+    """
+    Devuelve True si el RSS de Vercel esta al dia comparado con el home Next.js.
+    El feed de Vercel a veces se queda CACHEADO/ATASCADO y no incluye las notas
+    recien publicadas (mientras el home si las muestra). En ese caso Make no ve
+    novedades y deja de publicar. Comparamos el slug de la nota #0 del home con
+    los slugs del feed: si la mas reciente del home NO esta en el feed, esta viejo.
+    """
+    import re as _re
+    try:
+        r = requests.get(
+            NEXTJS_URL,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"},
+            timeout=VERCEL_TIMEOUT,
+        )
+        if not r.ok:
+            return True  # no podemos comparar -> asumimos fresco (no bloquear Vercel)
+        posts = _re.findall(r'<a[^>]+href="/posts/([^"]+)"[^>]*>\s*<h3', r.text)
+        if not posts:
+            return True
+        # slugs mas recientes del home (top 3)
+        top_home = []
+        seen = set()
+        for s in posts:
+            if s in seen:
+                continue
+            seen.add(s)
+            top_home.append(s)
+            if len(top_home) >= 3:
+                break
+        feed_slugs = set(_re.findall(r'/posts/([^<]+)</link>', xml_bytes.decode("utf-8", "ignore")))
+        # Si NINGUNA de las 3 mas nuevas del home esta en el feed -> feed atascado
+        if not any(s in feed_slugs for s in top_home):
+            app.logger.warning("Vercel RSS desactualizado: top del home no esta en el feed")
+            return False
+        return True
+    except Exception as e:
+        app.logger.warning(f"chequeo frescura Vercel fallo: {type(e).__name__}: {e}")
+        return True
+
+
 @app.route("/rss-proxy", methods=["GET"])
 def rss_proxy():
     """
-    RSS proxy con 3 capas de resiliencia:
-    1. RSS de Vercel (www.lared1061.com/feed) — fuente primaria
+    RSS proxy con capas de resiliencia:
+    1. RSS de Vercel (www.lared1061.com/feed) — SOLO si esta fresco vs el home
+    1.5. Scraper Next.js (www.lared1061.com HTML) — refleja el sitio real, fechas
+         decrecientes por posicion para que Make detecte orden/novedad
     2. Cache en memoria del último feed exitoso — hasta 1 hora
     3. WP REST API directa — último recurso
     """
     global _feed_cache
     import xml.etree.ElementTree as ET
 
-    # --- Capa 1: RSS Vercel ---
+    # --- Capa 1: RSS Vercel (solo si NO esta atascado) ---
     try:
         resp = requests.get(
             VERCEL_RSS,
@@ -867,9 +911,13 @@ def rss_proxy():
         )
         if resp.ok and len(resp.content) > 500:
             ET.fromstring(resp.content)  # validar XML
-            _feed_cache["xml"] = resp.content
-            _feed_cache["ts"] = time.time()
-            return Response(resp.content, mimetype="application/rss+xml")
+            if _vercel_feed_is_fresh(resp.content):
+                _feed_cache["xml"] = resp.content
+                _feed_cache["ts"] = time.time()
+                app.logger.info("rss-proxy: sirviendo desde Vercel RSS (fresco)")
+                return Response(resp.content, mimetype="application/rss+xml")
+            else:
+                app.logger.warning("rss-proxy: Vercel RSS atascado, usando scraper Next.js")
     except Exception as e:
         app.logger.warning(f"rss-proxy capa1 (Vercel) falló: {type(e).__name__}: {e}")
 
