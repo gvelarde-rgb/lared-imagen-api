@@ -954,6 +954,53 @@ def rss_proxy():
 
 
 
+@app.route("/rss-rescate", methods=["GET"])
+def rss_rescate():
+    """
+    Ruta TEMPORAL de rescate. Toma el feed normal y altera los GUID/link
+    (sufijo unico) para que el trigger RSS de Make los trate como notas NUEVAS
+    y las republique, incluyendo las que quedaron atrapadas.
+    Acepta ?n=15 para limitar items y ?tag=xxx para el sufijo de unicidad.
+    Quitar/ignorar esta ruta despues del rescate.
+    """
+    import xml.etree.ElementTree as ET
+    tag = request.args.get("tag", str(int(time.time())))
+    try:
+        n = int(request.args.get("n", "15"))
+    except ValueError:
+        n = 15
+
+    # Reusar la logica del proxy para obtener el feed base
+    try:
+        feed_xml = _build_feed_from_nextjs()
+    except Exception:
+        feed_xml = _feed_cache.get("xml")
+        if not feed_xml:
+            try:
+                feed_xml = _build_feed_from_wp()
+            except Exception as e:
+                return Response(f"rescate: feed no disponible: {e}", status=503)
+
+    root = ET.fromstring(feed_xml)
+    channel = root.find("channel") or root
+    items = channel.findall("item")
+    # Limitar a n
+    for extra in items[n:]:
+        channel.remove(extra)
+    items = channel.findall("item")
+    for it in items:
+        g = it.find("guid")
+        if g is not None and g.text:
+            g.text = f"{g.text}#rescate-{tag}"
+        else:
+            link = it.find("link")
+            base = link.text if (link is not None and link.text) else "x"
+            ng = ET.SubElement(it, "guid")
+            ng.text = f"{base}#rescate-{tag}"
+    out = ET.tostring(root, encoding="utf-8")
+    return Response(out, mimetype="application/rss+xml")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
