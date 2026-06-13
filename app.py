@@ -964,7 +964,9 @@ def rss_rescate():
     Quitar/ignorar esta ruta despues del rescate.
     """
     import xml.etree.ElementTree as ET
-    tag = request.args.get("tag", str(int(time.time())))
+    # GUID unico por request: cada llamada produce GUIDs distintos, asi el
+    # trigger de Make (que ya fijo baseline en el run previo) los ve nuevos.
+    tag = request.args.get("tag") or f"{int(time.time())}-{os.urandom(3).hex()}"
     try:
         n = int(request.args.get("n", "15"))
     except ValueError:
