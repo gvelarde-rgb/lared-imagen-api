@@ -868,7 +868,7 @@ def _vercel_feed_is_fresh(xml_bytes):
         posts = _re.findall(r'<a[^>]+href="/posts/([^"]+)"[^>]*>\s*<h3', r.text)
         if not posts:
             return True
-        # slugs mas recientes del home (top 3)
+        # slugs mas recientes del home (top 10), deduplicados manteniendo orden
         top_home = []
         seen = set()
         for s in posts:
@@ -876,12 +876,16 @@ def _vercel_feed_is_fresh(xml_bytes):
                 continue
             seen.add(s)
             top_home.append(s)
-            if len(top_home) >= 3:
+            if len(top_home) >= 10:
                 break
         feed_slugs = set(_re.findall(r'/posts/([^<]+)</link>', xml_bytes.decode("utf-8", "ignore")))
-        # Si NINGUNA de las 3 mas nuevas del home esta en el feed -> feed atascado
-        if not any(s in feed_slugs for s in top_home):
-            app.logger.warning("Vercel RSS desactualizado: top del home no esta en el feed")
+        # Contamos cuantas de las top-10 del home FALTAN en el feed.
+        # El home mezcla notas nuevas con destacados fijos (que si estan en el feed),
+        # asi que un umbral suave: si faltan 3+ de las 10 mas recientes, el feed de
+        # Vercel se quedo atascado y no trae las notas nuevas -> usar scraper.
+        faltantes = sum(1 for s in top_home if s not in feed_slugs)
+        if faltantes >= 3:
+            app.logger.warning(f"Vercel RSS desactualizado: faltan {faltantes}/10 notas recientes del home")
             return False
         return True
     except Exception as e:
