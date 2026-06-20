@@ -11,4 +11,19 @@ services:
         value: "436436496366223"
       - key: CLOUDINARY_API_SECRET
         sync: false
+      # Watchdog del scenario de Make (alerta + auto-recuperacion)
+      - key: MAKE_API_TOKEN
+        sync: false
+      - key: ALERT_SMTP_USER
+        sync: false
+      - key: ALERT_SMTP_PASS
+        sync: false
+      - key: ALERT_TO
+        value: gvelarde@rcn.com.gt
+      - key: WATCHDOG_ENABLED
+        value: "1"
+      - key: ALERT_THRESHOLD_MIN
+        value: "45"
+      - key: WATCHDOG_FEED_URL
+        value: https://lared-imagen-api.onrender.com/rss-proxy
     plan: free

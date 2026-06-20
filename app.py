@@ -28,6 +28,10 @@ app = Flask(__name__)
 from mia_brands import mia_bp
 app.register_blueprint(mia_bp)
 
+# Watchdog: vigila si Make dejo de publicar en Facebook y alerta por correo.
+from watchdog import start_watchdog, get_status as _watchdog_status
+start_watchdog()
+
 # Configuración de Cloudinary desde variables de entorno
 cloudinary.config(
     cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME", "dd9cuovet"),
@@ -1127,6 +1131,15 @@ def rss_health():
     out["source"] = _feed_cache.get("source")
     return jsonify(out)
 
+
+@app.route("/watchdog-status", methods=["GET"])
+def watchdog_status():
+    """Estado del watchdog: minutos desde la ultima publicacion, notas pendientes
+    y si hay falla. Para inspeccionar la salud del pipeline a demanda."""
+    try:
+        return jsonify(_watchdog_status())
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
 if __name__ == "__main__":

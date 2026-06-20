@@ -6,3 +6,4 @@ __pycache__/
 # *.png excluido para permitir logo_lared.png
 venv/
 .venv/
+.env.alert
