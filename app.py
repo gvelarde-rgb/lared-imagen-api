@@ -773,9 +773,117 @@ def _save_real_dates(d):
 
 _real_dates = _load_real_dates()  # { guid_url: pubDate_rfc2822 }, compartido en disco
 
+# Cache de METADATOS REALES por GUID (fecha + categorias) extraidos de la pagina
+# individual de cada nota. Resuelve la causa de fondo: cuando Vercel /feed cae y
+# WP REST esta bloqueado por el WAF, el scraper del home NO trae categorias ->
+# el filtro de Make descarta TODO -> Facebook queda mudo. Con este cache, el
+# scraper hace 1 fetch a /posts/SLUG por nota NUEVA, saca categoria real
+# (meta article:section) + fecha real (datePublished JSON-LD) y las reusa.
+# Persistido en disco para compartir entre workers gunicorn.
+_REAL_META_FILE = "/tmp/lared_real_meta.json"
+_real_meta_lock = threading.Lock()
+
+def _load_real_meta():
+    try:
+        with open(_REAL_META_FILE, "r") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+def _save_real_meta(d):
+    try:
+        tmp = _REAL_META_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            _json.dump(d, f)
+        os.replace(tmp, _REAL_META_FILE)
+    except Exception:
+        pass
+
+_real_meta = _load_real_meta()  # { guid_url: {"date": rfc2822, "cats": [..]} }
+
 VERCEL_RSS = "https://www.lared1061.com/feed"
 VERCEL_TIMEOUT = 12
 NEXTJS_URL = "https://www.lared1061.com"  # Capa 1.5: scraper del sitio Next.js
+
+# Categorias validas conocidas (las que el filtro de Make acepta + el resto del
+# sitio). Sirve para normalizar lo que saquemos de la pagina de la nota.
+_KNOWN_CATEGORIES = [
+    "Nacionales", "Internacionales", "Futbol Nacional", "Futbol Internacional",
+    "Deporte nacional", "Deporte internacional", "Economía", "Economia",
+]
+
+def _fetch_note_meta(note_url):
+    """
+    Hace 1 fetch a la pagina individual de una nota (/posts/SLUG) y extrae:
+      - categoria real  -> <meta property="article:section" content="...">
+      - fecha real      -> "datePublished":"2026-06-21T18:35:34-06:00" (JSON-LD)
+    Devuelve {"date": rfc2822|None, "cats": [str, ...]}. Tolerante a fallos:
+    si algo no se puede sacar, devuelve lo que haya (None / []).
+    """
+    import re as _re
+    import html as _html
+    out = {"date": None, "cats": []}
+    try:
+        r = requests.get(
+            note_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "es-GT,es;q=0.9",
+            },
+            timeout=VERCEL_TIMEOUT,
+        )
+        if not r.ok:
+            return out
+        d = _html.unescape(r.text)
+        # El payload Next.js escapa comillas y signos como \" \u003e \u003c \u002f.
+        # Normalizar TODO para no saltar entre etiquetas al hacer regex.
+        d2 = (d.replace('\\"', '"')
+                .replace('\\u003e', '>').replace('\\u003E', '>')
+                .replace('\\u003c', '<').replace('\\u003C', '<')
+                .replace('\\u002f', '/').replace('\\u002F', '/')
+                .replace('\\/', '/'))
+
+        # --- Categoria --- (no cruzar de etiqueta: prohibir > entre clave y content)
+        cats = []
+        for c in _re.findall(r'article:section"\s+content="([^"]{2,60})"', d2):
+            c = c.strip()
+            if c and c not in cats:
+                cats.append(c)
+        # respaldo: articleSection del JSON-LD
+        if not cats:
+            for c in _re.findall(r'articleSection"?\s*:\s*\[?"([^"]{2,60})"', d2):
+                c = c.strip()
+                if c and c not in cats:
+                    cats.append(c)
+        # Sanitizar: descartar valores que parezcan fecha/timestamp (falsos matches).
+        cats = [c for c in cats if not _re.match(r'^\d{4}-\d\d-\d\d', c)]
+        out["cats"] = cats
+
+        # --- Fecha real (datePublished con zona horaria) ---
+        m = _re.search(r'datePublished"?\s*:\s*"([0-9T:\-+\.Z]+)"', d2)
+        if m:
+            try:
+                dt = parsedate_to_datetime(m.group(1)) if "," in m.group(1) else None
+            except Exception:
+                dt = None
+            if dt is None:
+                # ISO 8601 -> datetime
+                try:
+                    from datetime import datetime as _dt
+                    iso = m.group(1).replace("Z", "+00:00")
+                    dt = _dt.fromisoformat(iso)
+                except Exception:
+                    dt = None
+            if dt is not None:
+                try:
+                    out["date"] = formatdate(dt.timestamp(), usegmt=True)
+                except Exception:
+                    pass
+    except Exception as e:
+        app.logger.warning(f"_fetch_note_meta {note_url}: {type(e).__name__}: {e}")
+    return out
 
 
 def _build_feed_from_nextjs():
@@ -842,28 +950,61 @@ def _build_feed_from_nextjs():
         title = _escape_xml(title_raw.strip())
         pub_link = _escape_xml(f"https://www.lared1061.com{path}")
         real_link = f"https://www.lared1061.com{path}"
-        with _real_dates_lock:
-            # Recargar del disco para ver fechas que otro worker ya fijo.
-            disk = _load_real_dates()
-            if disk:
-                _real_dates.update(disk)
-            cached_date = _real_dates.get(real_link)
+
+        # --- Resolver fecha + categoria REALES de la nota (cache por GUID) ---
+        # 1 fetch por nota NUEVA a /posts/SLUG. Notas ya conocidas = 0 fetch.
+        cats = []
+        pub_date = None
+        with _real_meta_lock:
+            disk_m = _load_real_meta()
+            if disk_m:
+                _real_meta.update(disk_m)
+            meta = _real_meta.get(real_link)
+            if meta:
+                pub_date = meta.get("date")
+                cats = meta.get("cats") or []
+
+        if pub_date is None or not cats:
+            # No tenemos meta completa -> 1 fetch a la pagina de la nota.
+            fetched = _fetch_note_meta(real_link)
+            if fetched.get("date") and pub_date is None:
+                pub_date = fetched["date"]
+            if fetched.get("cats") and not cats:
+                cats = fetched["cats"]
+            with _real_meta_lock:
+                _real_meta[real_link] = {"date": pub_date, "cats": cats}
+                _save_real_meta(_real_meta)
+
+        # Compatibilidad: tambien alimentar el cache viejo de fechas.
+        if pub_date:
+            with _real_dates_lock:
+                if _real_dates.get(real_link) != pub_date:
+                    _real_dates[real_link] = pub_date
+                    _save_real_dates(_real_dates)
+        else:
+            # Sin fecha real (la pagina no la dio): reusar fecha vieja cacheada o
+            # base vieja estable, para no envenenar el puntero de Make.
+            with _real_dates_lock:
+                disk = _load_real_dates()
+                if disk:
+                    _real_dates.update(disk)
+                cached_date = _real_dates.get(real_link)
             if cached_date:
-                # Fecha REAL/ya-fijada conocida -> usarla siempre (estable).
                 pub_date = cached_date
             else:
-                # Nota SIN fecha real conocida (Vercel aun no la trae). NUNCA le
-                # damos "ahora": una fecha futura/reciente sintetica envenena el
-                # puntero de Make (la veria como "la mas nueva" y al cambiar luego
-                # desincroniza). En su lugar le damos una fecha VIEJA estable
-                # (epoch base - pos), asi queda al fondo del feed y no se trata
-                # como novedad hasta que Vercel publique su fecha REAL (entonces
-                # se cachea y sube al lugar correcto). Persistimos por GUID.
                 _OLD_BASE = 1700000000  # 2023, claramente vieja
                 pub_date = formatdate(_OLD_BASE - (_pos * 60), usegmt=True)
-                _real_dates[real_link] = pub_date
-                _save_real_dates(_real_dates)
+                with _real_dates_lock:
+                    _real_dates[real_link] = pub_date
+                    _save_real_dates(_real_dates)
         _pos += 1
+
+        # Categoria de respaldo: si no se pudo resolver, marcar "Nacionales" para
+        # que el item SIEMPRE pase el filtro (decision usuario: publicar todo,
+        # maxima continuidad, nunca quedar mudo).
+        if not cats:
+            cats = ["Nacionales"]
+        categories_xml = "".join(f"<category>{_escape_xml(c)}</category>" for c in cats)
 
         foto_url = img_map.get(title_raw.strip(), "")
         media_xml = (
@@ -881,6 +1022,7 @@ def _build_feed_from_nextjs():
       <link>{pub_link}</link>
       <guid isPermaLink="true">{pub_link}</guid>
       <pubDate>{pub_date}</pubDate>
+      {categories_xml}
       {media_xml}
     </item>"""))
 
@@ -1129,7 +1271,56 @@ def rss_health():
     except Exception as e:
         out["vercel_error"] = f"{type(e).__name__}: {e}"
     out["source"] = _feed_cache.get("source")
+
+    # --- Chequeo de CATEGORIAS en el feed REAL servido (causa raiz de los huecos) ---
+    # Si el feed actual trae items sin <category>, el filtro de Make los descarta
+    # y Facebook deja de publicar. Reportarlo explicitamente.
+    try:
+        import xml.etree.ElementTree as _ET2
+        served = _make_served_feed_for_health()
+        if served:
+            root2 = _ET2.fromstring(served)
+            its = root2.findall(".//item")
+            n = len(its)
+            with_cat = sum(1 for it in its if it.find("category") is not None)
+            out["served_items"] = n
+            out["served_with_category"] = with_cat
+            out["category_coverage_ok"] = (n > 0 and with_cat == n)
+            if n > 0 and with_cat < n:
+                out["category_warning"] = f"{n - with_cat}/{n} items SIN categoria -> riesgo de hueco en Facebook"
+    except Exception as e:
+        out["served_error"] = f"{type(e).__name__}: {e}"
+
     return jsonify(out)
+
+
+def _make_served_feed_for_health():
+    """Reconstruye el feed tal como lo serviria /rss-proxy ahora mismo (para
+    diagnostico). No cambia el cache global."""
+    import xml.etree.ElementTree as _ET3
+    # Capa 1: Vercel fresco
+    try:
+        resp = requests.get(
+            VERCEL_RSS,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; RSSProxy/1.0)",
+                     "Accept": "application/rss+xml, application/xml"},
+            timeout=VERCEL_TIMEOUT,
+        )
+        if resp.ok and len(resp.content) > 500:
+            _ET3.fromstring(resp.content)
+            if _vercel_feed_is_fresh(resp.content):
+                return _fix_vercel_tz(resp.content)
+    except Exception:
+        pass
+    # Capa 2: scraper
+    try:
+        return _build_feed_from_nextjs()
+    except Exception:
+        pass
+    # Capa 3: cache
+    if _feed_cache.get("xml"):
+        return _feed_cache["xml"]
+    return None
 
 
 @app.route("/watchdog-status", methods=["GET"])
