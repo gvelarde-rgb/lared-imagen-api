@@ -53,6 +53,7 @@ SMTP_HOST = os.environ.get("ALERT_SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("ALERT_SMTP_PORT", "587"))
 
 FEED_URL = os.environ.get("WATCHDOG_FEED_URL", "http://127.0.0.1:" + os.environ.get("PORT", "5000") + "/rss-proxy")
+HEALTH_URL = os.environ.get("WATCHDOG_HEALTH_URL", FEED_URL.rsplit("/rss-proxy", 1)[0] + "/rss-health")
 SCENARIO_LINK = f"{MAKE_BASE}/12505/scenarios/{SCENARIO_ID}/edit"
 
 # Categorias que pasan el filtro de Make (mismas del scenario)
@@ -145,10 +146,14 @@ def _new_passing_items_after(ts_epoch):
         count = 0
         newest_title = None
         for it in items:
-            cat_m = re.search(r"<category><!\[CDATA\[(.*?)\]\]>", it)
+            # Categoria: aceptar con o sin CDATA. Con el filtro Make abierto
+            # (publicar todo), un item SIN categoria tambien pasa -> lo contamos.
+            cat_m = (re.search(r"<category><!\[CDATA\[(.*?)\]\]>", it)
+                     or re.search(r"<category>(.*?)</category>", it))
             date_m = re.search(r"<pubDate>(.*?)</pubDate>", it)
-            cat = cat_m.group(1) if cat_m else ""
-            if cat not in ALLOWED_CATS:
+            cat = cat_m.group(1).strip() if cat_m else ""
+            # Pasa el filtro si: esta en las permitidas O no tiene categoria.
+            if cat and cat not in ALLOWED_CATS:
                 continue
             if date_m:
                 try:
@@ -158,12 +163,68 @@ def _new_passing_items_after(ts_epoch):
                 if ts_epoch is None or item_ts > ts_epoch + 30:  # 30s de margen
                     count += 1
                     if newest_title is None:
-                        t_m = re.search(r"<title><!\[CDATA\[(.*?)\]\]>", it)
+                        t_m = (re.search(r"<title><!\[CDATA\[(.*?)\]\]>", it)
+                               or re.search(r"<title>(.*?)</title>", it))
                         newest_title = t_m.group(1) if t_m else None
         return count, newest_title
     except Exception as e:
         _log(f"error consultando feed: {e}")
         return 0, None
+
+
+# ---- Chequear cobertura de categorias (riesgo de hueco silencioso) ----
+def _check_category_coverage():
+    """Devuelve (riesgo:bool, info:dict). Riesgo = Vercel caido Y feed sin categorias.
+    Sin categoria, el scraper Next.js puede dejar items que el filtro Make descarta
+    -> FB mudo aunque el watchdog de publicaciones no lo detecte todavia."""
+    try:
+        r = requests.get(HEALTH_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        h = r.json()
+    except Exception as e:
+        _log(f"no se pudo consultar rss-health: {e}")
+        return False, None
+    source = h.get("source")
+    cov_ok = h.get("category_coverage_ok")
+    vercel_ok = h.get("vercel_ok")
+    riesgo = (source != "vercel") and (cov_ok is False)
+    return riesgo, {"source": source, "category_coverage_ok": cov_ok, "vercel_ok": vercel_ok}
+
+
+def _send_coverage_alert(info):
+    if not (SMTP_USER and SMTP_PASS and ALERT_TO):
+        _log("SMTP no configurado, no se envia correo de cobertura")
+        return False
+    body = f"""AVISO - La Red RSS a Facebook (riesgo de hueco)
+
+El feed esta sirviendo notas SIN categoria y la fuente primaria (Vercel) esta caida.
+Aunque el filtro de Make ahora deja pasar items sin categoria, conviene revisar:
+
+- Fuente actual del feed: {info.get('source')}
+- Cobertura de categorias OK: {info.get('category_coverage_ok')}
+- Vercel /feed disponible: {info.get('vercel_ok')}
+
+Posible causa: Vercel /feed da 500 y WP REST esta bloqueado (WAF) -> scraper Next.js
+sin categorias. El servicio sigue publicando, pero revisar el front Next.js (/feed 500)
+para restaurar la fuente primaria con categorias reales.
+
+Scenario: {SCENARIO_LINK}
+
+Aviso automatico del watchdog (lared-imagen-api).
+"""
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = "[AVISO] La Red feed sin categorias (Vercel caido)"
+    msg["From"] = SMTP_USER
+    msg["To"] = ALERT_TO
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+            s.starttls()
+            s.login(SMTP_USER, SMTP_PASS)
+            s.sendmail(SMTP_USER, [ALERT_TO], msg.as_string())
+        _log(f"correo de aviso de cobertura enviado a {ALERT_TO}")
+        return True
+    except Exception as e:
+        _log(f"error enviando correo de cobertura: {e}")
+        return False
 
 
 # ---- Auto-recuperar: forzar run ----
@@ -230,6 +291,20 @@ def _check_once():
     pending, newest_title = _new_passing_items_after(ts_epoch)
     st["pending_new"] = pending
 
+    # Aviso de cobertura: feed sin categorias + Vercel caido (riesgo de hueco silencioso)
+    try:
+        cov_riesgo, cov_info = _check_category_coverage()
+        st["coverage_risk"] = cov_riesgo
+        if cov_riesgo:
+            if not st.get("coverage_alerted"):
+                _log(f"RIESGO cobertura: feed sin categorias + Vercel caido {cov_info}")
+                _send_coverage_alert(cov_info)
+                st["coverage_alerted"] = True
+        else:
+            st["coverage_alerted"] = False
+    except Exception as e:
+        _log(f"error en chequeo de cobertura: {e}")
+
     # Condicion de falla: pasaron +umbral min Y hay notas nuevas que pasan el filtro
     is_failing = (mins >= ALERT_THRESHOLD_MIN) and (pending > 0)
 
@@ -294,8 +369,14 @@ def get_status():
     st = _load_state()
     mins, ts_epoch = _minutes_since_last_publish_v2()
     pending, newest = _new_passing_items_after(ts_epoch) if ts_epoch else (None, None)
+    try:
+        cov_riesgo, cov_info = _check_category_coverage()
+    except Exception:
+        cov_riesgo, cov_info = None, None
     return {
         "enabled": ENABLED,
+        "coverage_risk": cov_riesgo,
+        "coverage_info": cov_info,
         "scenario_id": SCENARIO_ID,
         "threshold_min": ALERT_THRESHOLD_MIN,
         "last_publish_min_ago": mins,
