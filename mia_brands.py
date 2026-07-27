@@ -345,32 +345,50 @@ def _generate_branded_image(brand_key: str, titulo: str, foto_url: str) -> Image
     domain = brand["cms_domain"]
     accent = brand["accent_color"]
 
-    # Download photo
-    if domain in foto_url:
-        session = _get_sg_session(domain)
-        resp = session.get(foto_url, timeout=15)
-    else:
-        resp = requests.get(foto_url, headers=BROWSER_HEADERS, timeout=15)
-    resp.raise_for_status()
-    photo = Image.open(io.BytesIO(resp.content)).convert("RGB")
+    # Download photo. If there's no photo or the download fails, fall back to a
+    # solid brand-color background so the post still goes out (continuidad).
+    photo = None
+    if foto_url:
+        try:
+            if domain in foto_url:
+                session = _get_sg_session(domain)
+                resp = session.get(foto_url, timeout=15)
+            else:
+                resp = requests.get(foto_url, headers=BROWSER_HEADERS, timeout=15)
+            resp.raise_for_status()
+            photo = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        except Exception:
+            photo = None
 
     # Create canvas
     canvas = Image.new("RGB", (OUTPUT_W, OUTPUT_H), (0, 0, 0))
 
-    # Cover-fit the photo
-    photo_ratio = photo.width / photo.height
-    target_ratio = OUTPUT_W / OUTPUT_H
-    if photo_ratio > target_ratio:
-        new_h = OUTPUT_H
-        new_w = int(new_h * photo_ratio)
+    if photo is not None:
+        # Cover-fit the photo
+        photo_ratio = photo.width / photo.height
+        target_ratio = OUTPUT_W / OUTPUT_H
+        if photo_ratio > target_ratio:
+            new_h = OUTPUT_H
+            new_w = int(new_h * photo_ratio)
+        else:
+            new_w = OUTPUT_W
+            new_h = int(new_w / photo_ratio)
+        photo = photo.resize((new_w, new_h), Image.LANCZOS)
+        left = (new_w - OUTPUT_W) // 2
+        top = (new_h - OUTPUT_H) // 2
+        photo = photo.crop((left, top, left + OUTPUT_W, top + OUTPUT_H))
+        canvas.paste(photo)
     else:
-        new_w = OUTPUT_W
-        new_h = int(new_w / photo_ratio)
-    photo = photo.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - OUTPUT_W) // 2
-    top = (new_h - OUTPUT_H) // 2
-    photo = photo.crop((left, top, left + OUTPUT_W, top + OUTPUT_H))
-    canvas.paste(photo)
+        # No photo: vertical gradient using the brand accent color as background
+        r, g, b = accent
+        for y in range(OUTPUT_H):
+            f = y / OUTPUT_H
+            row = (
+                int(r * (0.55 + 0.45 * f)),
+                int(g * (0.55 + 0.45 * f)),
+                int(b * (0.55 + 0.45 * f)),
+            )
+            ImageDraw.Draw(canvas).line([(0, y), (OUTPUT_W, y)], fill=row)
 
     # Create overlay layer
     overlay = Image.new("RGBA", (OUTPUT_W, OUTPUT_H), (0, 0, 0, 0))
@@ -458,8 +476,8 @@ def mia_rss_proxy():
 def mia_generar_imagen():
     titulo = request.args.get("titulo", "")
     foto_url = request.args.get("foto_url", "")
-    if not titulo or not foto_url:
-        return Response("Faltan parametros: titulo, foto_url", status=400)
+    if not titulo:
+        return Response("Falta parametro: titulo", status=400)
     try:
         img = _generate_branded_image("mia", titulo, foto_url)
     except Exception as e:
@@ -497,8 +515,8 @@ def globo_rss_proxy():
 def globo_generar_imagen():
     titulo = request.args.get("titulo", "")
     foto_url = request.args.get("foto_url", "")
-    if not titulo or not foto_url:
-        return Response("Faltan parametros: titulo, foto_url", status=400)
+    if not titulo:
+        return Response("Falta parametro: titulo", status=400)
     try:
         img = _generate_branded_image("globo", titulo, foto_url)
     except Exception as e:
@@ -536,8 +554,8 @@ def clasica_rss_proxy():
 def clasica_generar_imagen():
     titulo = request.args.get("titulo", "")
     foto_url = request.args.get("foto_url", "")
-    if not titulo or not foto_url:
-        return Response("Faltan parametros: titulo, foto_url", status=400)
+    if not titulo:
+        return Response("Falta parametro: titulo", status=400)
     try:
         img = _generate_branded_image("clasica", titulo, foto_url)
     except Exception as e:
@@ -575,8 +593,8 @@ def n949_rss_proxy():
 def n949_generar_imagen():
     titulo = request.args.get("titulo", "")
     foto_url = request.args.get("foto_url", "")
-    if not titulo or not foto_url:
-        return Response("Faltan parametros: titulo, foto_url", status=400)
+    if not titulo:
+        return Response("Falta parametro: titulo", status=400)
     try:
         img = _generate_branded_image("949", titulo, foto_url)
     except Exception as e:
